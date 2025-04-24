@@ -266,7 +266,6 @@ fn readUntilDataFrameHeader(
                     return error.InvalidMessage;
                 },
             };
-            std.log.debug("control frame: {}", .{control_frame_header});
             if (!control_frame_header.fin) {
                 std.log.err("peer gave us a control frame which is fragmented, which is not allowed", .{});
                 return error.InvalidMessage;
