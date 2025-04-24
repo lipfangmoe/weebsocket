@@ -1,5 +1,8 @@
 .{
-    .name = "weebsocket",
-    .version = "0.1.7",
+    .name = .weebsocket,
+    .version = "0.2.0",
+    .minimum_zig_version = "0.14.0",
+    .fingerprint = 0xd1ee0877b7793a31,
+
     .paths = .{ "src", ".gitignore", "build.zig", "build.zig.zon", "README.md" },
 }
