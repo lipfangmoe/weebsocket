@@ -1,6 +1,6 @@
 //! Server which listens for Websocket Handshakes.
-//! Only need to call `deinit()` if created via `init(Address)`.
-//! If you have an existing `std.net.Server`, it is okay to create this struct via struct initialization.
+//! Only need to call `deinit()` if created via `init()`.
+//! If you have an existing `std.http.Client`, it is okay to create this struct via struct initialization.
 
 const std = @import("std");
 const client = @import("../root.zig").client;
@@ -15,11 +15,13 @@ pub fn init(allocator: std.mem.Allocator) Client {
     return .{ .http_client = http_client };
 }
 
+const HandshakeError = error{NotWebsocketServer} || std.http.Client.Request.SendError || std.http.Client.Request.WaitError;
+
 pub fn handshake(
     self: *Client,
     uri: std.Uri,
     extra_headers: ?[]const std.http.Header,
-) !client.Connection {
+) HandshakeError!client.Connection {
     var buf: [1000]u8 = undefined;
     const websocket_key = generateRandomWebsocketKey();
 

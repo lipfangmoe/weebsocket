@@ -122,7 +122,7 @@ pub const AnyFrameHeader = union(enum) {
     pub fn writeTo(self: AnyFrameHeader, writer: std.io.AnyWriter) !void {
         switch (self) {
             inline else => |header| {
-                const BackingInt = @typeInfo(@TypeOf(header)).Struct.backing_integer.?;
+                const BackingInt = @typeInfo(@TypeOf(header)).@"struct".backing_integer.?;
                 try writer.writeInt(BackingInt, @bitCast(header), .big);
             },
         }
