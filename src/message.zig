@@ -58,7 +58,6 @@ pub fn controlFrameHandlerWithMask(comptime mask: ws.message.frame.Mask) Control
 
             switch (opcode) {
                 .ping => {
-                    std.log.debug("ping received, attempting to write pong", .{});
                     var control_message_writer = ws.message.AnyMessageWriter.initControl(conn_writer, frame_header.payload_len, .pong, mask) catch |err| return switch (err) {
                         error.EndOfStream => error.EndOfStream,
                         else => {

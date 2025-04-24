@@ -103,7 +103,6 @@ pub const WriteMessageError = error{
 };
 
 pub fn readMessage(self: *Connection) ReadMessageError!ws.MessageReader {
-    std.log.debug("BEGIN readMessage()", .{});
     const msg = ws.MessageReader.readFrom(self.reader(), self.control_frame_handler, self.writer()) catch |err| {
         return switch (err) {
             error.ReceivedCloseFrame => {
@@ -121,26 +120,19 @@ pub fn readMessage(self: *Connection) ReadMessageError!ws.MessageReader {
             },
         };
     };
-    std.log.debug("END   readMessage()", .{});
     return msg;
 }
 
 /// Prints some bytes as a websocket message.
 pub fn printMessage(self: *Connection, msg_type: ws.message.Type, comptime fmt: []const u8, args: anytype) !void {
-    std.log.debug("BEGIN printMessage({}, {s})", .{ msg_type, fmt });
-
     const len = std.fmt.count(fmt, args);
 
     var message_writer = try self.writeMessageStream(msg_type, len);
     try std.fmt.format(try message_writer.payloadWriter(), fmt, args);
-
-    std.log.debug("END   printMessage({}, {s})", .{ msg_type, fmt });
 }
 
 /// Writes some bytes as a websocket message.
 pub fn writeMessage(self: *Connection, msg_type: ws.message.Type, message: []const u8) WriteMessageError!void {
-    std.log.debug("BEGIN writeMessage({}, {s})", .{ msg_type, message });
-
     var message_writer = try self.writeMessageStream(msg_type, message.len);
     message_writer.payloadWriter().writeAll(message) catch |err| return switch (err) {
         error.EndOfStream => error.EndOfStream,
@@ -149,8 +141,6 @@ pub fn writeMessage(self: *Connection, msg_type: ws.message.Type, message: []con
             return error.Unknown;
         },
     };
-
-    std.log.debug("END   writeMessage({}, {s})", .{ msg_type, message });
 }
 
 /// Writes a stream of bytes as a websocket message.
@@ -181,13 +171,11 @@ pub fn writeMessageStreamUnknownLength(self: *Connection, msg_type: ws.message.T
 fn read(self_erased: *const anyopaque, bytes: []u8) anyerror!usize {
     var self: *Connection = @constCast(@alignCast(@ptrCast(self_erased)));
     const n = try self.http_request.connection.?.read(bytes);
-    std.log.debug("read(len: {}): {}", .{ n, fmtCompact(bytes[0..n]) });
     return n;
 }
 fn write(self_erased: *const anyopaque, bytes: []const u8) anyerror!usize {
     var self: *Connection = @constCast(@alignCast(@ptrCast(self_erased)));
     const n = try self.http_request.connection.?.write(bytes);
-    std.log.debug("write(len: {}): {}", .{ n, fmtCompact(bytes[0..n]) });
     try self.http_request.connection.?.flush();
     return n;
 }

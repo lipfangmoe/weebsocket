@@ -51,7 +51,6 @@ fn echo(connection: *ws.Connection) !void {
             return error.Expected;
         },
     };
-    std.log.debug("message read: {}", .{fmtNoMaxDepth(message)});
 
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
