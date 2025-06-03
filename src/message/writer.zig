@@ -16,7 +16,7 @@ pub const AnyMessageWriter = union(enum) {
         frame_header.writeTo(underlying_writer) catch |err| return switch (err) {
             error.EndOfStream => error.EndOfStream,
             else => {
-                std.log.err("unexpected write failure while writing frame header: {}", .{err});
+                ws.log.err("unexpected write failure while writing frame header: {}", .{err});
                 return error.UnexpectedWriteFailure;
             },
         };
@@ -94,7 +94,7 @@ pub const MultiFrameMessageWriter = struct {
         frame_header.writeTo(self.underlying_writer) catch |err| return switch (err) {
             error.EndOfStream => error.EndOfStream,
             else => {
-                std.log.err("Unexpected write failure while writing frame header for fragmented message: {}", .{err});
+                ws.log.err("Unexpected write failure while writing frame header for fragmented message: {}", .{err});
                 return error.UnexpectedWriteFailure;
             },
         };
@@ -104,7 +104,7 @@ pub const MultiFrameMessageWriter = struct {
             return self.underlying_writer.writeAll(payload) catch |err| return switch (err) {
                 error.EndOfStream => error.EndOfStream,
                 else => {
-                    std.log.err("Unexpected write failure while writing payload for fragmented message: {}", .{err});
+                    ws.log.err("Unexpected write failure while writing payload for fragmented message: {}", .{err});
                     return error.UnexpectedWriteFailure;
                 },
             };
@@ -123,7 +123,7 @@ pub const MultiFrameMessageWriter = struct {
             self.underlying_writer.writeAll(dest_slice) catch |err| return switch (err) {
                 error.EndOfStream => error.EndOfStream,
                 else => {
-                    std.log.err("Unexpected write failure while writing payload for fragmented message: {}", .{err});
+                    ws.log.err("Unexpected write failure while writing payload for fragmented message: {}", .{err});
                     return error.UnexpectedWriteFailure;
                 },
             };
@@ -172,7 +172,7 @@ pub const SingleFrameMessageWriter = struct {
             const n = self.underlying_writer.write(capped_bytes) catch |err| return switch (err) {
                 error.EndOfStream => error.EndOfStream,
                 else => {
-                    std.log.err("Unexpected write failure while writing payload for unfragmented message: {}", .{err});
+                    ws.log.err("Unexpected write failure while writing payload for unfragmented message: {}", .{err});
                     return error.UnexpectedWriteFailure;
                 },
             };
@@ -193,7 +193,7 @@ pub const SingleFrameMessageWriter = struct {
         const n = self.underlying_writer.write(masked_slice) catch |err| return switch (err) {
             error.EndOfStream => error.EndOfStream,
             else => {
-                std.log.err("Unexpected write failure while writing payload for unfragmented message: {}", .{err});
+                ws.log.err("Unexpected write failure while writing payload for unfragmented message: {}", .{err});
                 return error.UnexpectedWriteFailure;
             },
         };

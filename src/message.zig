@@ -61,7 +61,7 @@ pub fn controlFrameHandlerWithMask(comptime mask: ws.message.frame.Mask) Control
                     var control_message_writer = ws.message.AnyMessageWriter.initControl(conn_writer, frame_header.payload_len, .pong, mask) catch |err| return switch (err) {
                         error.EndOfStream => error.EndOfStream,
                         else => {
-                            std.log.err("Error while writing pong header: {}", .{err});
+                            ws.log.err("Error while writing pong header: {}", .{err});
                             return error.UnexpectedWriteFailure;
                         },
                     };
@@ -69,14 +69,14 @@ pub fn controlFrameHandlerWithMask(comptime mask: ws.message.frame.Mask) Control
                     payload_writer.writeAll(payload.constSlice()) catch |err| return switch (err) {
                         error.EndOfStream => error.EndOfStream,
                         else => {
-                            std.log.err("Error while writing pong payload: {}", .{err});
+                            ws.log.err("Error while writing pong payload: {}", .{err});
                             return error.UnexpectedWriteFailure;
                         },
                     };
                 },
                 .pong => {},
                 .close => {
-                    std.log.debug("peer sent close frame with payload '{s}'", .{payload.constSlice()});
+                    ws.log.debug("peer sent close frame with payload '{s}'", .{payload.constSlice()});
                     return error.ReceivedCloseFrame;
                 },
                 else => unreachable,

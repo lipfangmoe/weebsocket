@@ -24,7 +24,7 @@ pub const AnyMessageReader = union(enum) {
     pub fn readFrom(reader: std.io.AnyReader, controlFrameHandler: ws.message.ControlFrameHeaderHandlerFn, control_frame_writer: std.io.AnyWriter) ReadHeaderError!AnyMessageReader {
         const header = try readUntilDataFrameHeader(controlFrameHandler, reader, control_frame_writer);
         if (header.asMostBasicHeader().opcode == .continuation) {
-            std.log.err("continuation frame found as initial frame, which is not allowed", .{});
+            ws.log.err("continuation frame found as initial frame, which is not allowed", .{});
             return error.InvalidMessage;
         }
 
@@ -93,7 +93,7 @@ pub const FragmentedMessageReader = struct {
                     return err;
                 };
                 if (header.asMostBasicHeader().opcode != .continuation) {
-                    std.log.err("frame type {} found while reading fragmented message, should be .continuation", .{header.asMostBasicHeader().opcode});
+                    ws.log.err("frame type {} found while reading fragmented message, should be .continuation", .{header.asMostBasicHeader().opcode});
                     self.state = .{ .err = error.InvalidMessage };
                     return error.InvalidMessage;
                 }
@@ -131,7 +131,7 @@ pub const FragmentedMessageReader = struct {
         }
 
         const bytes_read = self.underlying_reader.read(capped_bytes) catch |err| {
-            std.log.err("unexpected error occurred while reading fragmented payload: {}", .{err});
+            ws.log.err("unexpected error occurred while reading fragmented payload: {}", .{err});
             self.state = .{ .err = error.UnexpectedReadFailure };
             return error.UnexpectedReadFailure;
         };
@@ -141,7 +141,7 @@ pub const FragmentedMessageReader = struct {
                 self.state.in_payload.prev_partial_codepoint,
                 capped_bytes[0..bytes_read],
             ) catch |err| {
-                std.log.err("invalid utf8 encountered while decoding .text frame of fragmented message: utf8ValidateStream({x:2>0}, {x:2>0}) returned {}", .{ self.state.in_payload.prev_partial_codepoint.constSlice(), capped_bytes, err });
+                ws.log.err("invalid utf8 encountered while decoding .text frame of fragmented message: utf8ValidateStream({x:2>0}, {x:2>0}) returned {}", .{ self.state.in_payload.prev_partial_codepoint.constSlice(), capped_bytes, err });
                 self.state = .{ .err = error.InvalidUtf8 };
                 return error.InvalidUtf8;
             };
@@ -198,19 +198,19 @@ pub const UnfragmentedMessageReader = struct {
         }
 
         const bytes_read = self.underlying_reader.read(capped_bytes) catch |err| return {
-            std.log.err("Error while reading payload of unfragmented message: {}", .{err});
+            ws.log.err("Error while reading payload of unfragmented message: {}", .{err});
             self.state = .{ .err = error.UnexpectedReadFailure };
             return error.UnexpectedReadFailure;
         };
 
         if (self.frame_header.asMostBasicHeader().opcode == .text) {
             const partial_codepoint = utf8_validator.utf8ValidateStream(state.prev_partial_codepoint, capped_bytes[0..bytes_read]) catch |err| {
-                std.log.err("invalid utf8 encountered while decoding .text frame of unfragmented message: utf8ValidateStream({x:2>0}, {x:2>0}) returned {}", .{ state.prev_partial_codepoint.constSlice(), capped_bytes, err });
+                ws.log.err("invalid utf8 encountered while decoding .text frame of unfragmented message: utf8ValidateStream({x:2>0}, {x:2>0}) returned {}", .{ state.prev_partial_codepoint.constSlice(), capped_bytes, err });
                 self.state = .{ .err = error.InvalidUtf8 };
                 return error.InvalidUtf8;
             };
             if (bytes_read == remaining_bytes and partial_codepoint.len > 0) {
-                std.log.err("payload ended in the middle of a utf8 byte sequence: {x}, expected {} more bytes", .{ partial_codepoint.constSlice(), std.unicode.utf8ByteSequenceLength(partial_codepoint.get(0)) catch unreachable });
+                ws.log.err("payload ended in the middle of a utf8 byte sequence: {x}, expected {} more bytes", .{ partial_codepoint.constSlice(), std.unicode.utf8ByteSequenceLength(partial_codepoint.get(0)) catch unreachable });
                 self.state = .{ .err = error.InvalidUtf8 };
                 return error.InvalidUtf8;
             }
@@ -249,38 +249,38 @@ fn readUntilDataFrameHeader(
         const current_header = ws.message.frame.AnyFrameHeader.readFrom(reader) catch |err| return switch (err) {
             error.EndOfStream => error.EndOfStream,
             else => {
-                std.log.err("error occurred while parsing header: {}", .{err});
+                ws.log.err("error occurred while parsing header: {}", .{err});
                 return error.InvalidMessage;
             },
         };
         const basic_header = current_header.asMostBasicHeader();
         if (basic_header.rsv1 or basic_header.rsv2 or basic_header.rsv3) {
-            std.log.err("reserve bits set rsv123=0b{b}{b}{b}", .{ @intFromBool(basic_header.rsv1), @intFromBool(basic_header.rsv2), @intFromBool(basic_header.rsv3) });
+            ws.log.err("reserve bits set rsv123=0b{b}{b}{b}", .{ @intFromBool(basic_header.rsv1), @intFromBool(basic_header.rsv2), @intFromBool(basic_header.rsv3) });
             return error.InvalidMessage;
         }
         if (basic_header.opcode.isControlFrame()) {
             const control_frame_header: ws.message.frame.FrameHeader(.u16, false) = switch (current_header) {
                 .u16_unmasked => |impl| impl,
                 else => |impl| {
-                    std.log.err("recevied control frame had a header of an unexpected size: {}", .{impl});
+                    ws.log.err("recevied control frame had a header of an unexpected size: {}", .{impl});
                     return error.InvalidMessage;
                 },
             };
             if (!control_frame_header.fin) {
-                std.log.err("peer gave us a control frame which is fragmented, which is not allowed", .{});
+                ws.log.err("peer gave us a control frame which is fragmented, which is not allowed", .{});
                 return error.InvalidMessage;
             }
 
             var payload = std.BoundedArray(u8, 125).init(control_frame_header.payload_len) catch return error.InvalidMessage;
             const n = reader.readAll(payload.slice()) catch |err| {
-                std.log.err("Unexpected read failure when reading payload from control frame: {}", .{err});
+                ws.log.err("Unexpected read failure when reading payload from control frame: {}", .{err});
                 return error.UnexpectedReadFailure;
             };
 
             if (n != control_frame_header.payload_len) {
                 return error.EndOfStream;
             }
-            std.log.debug("control frame payload: '{s}'", .{payload.constSlice()});
+            ws.log.debug("control frame payload: '{s}'", .{payload.constSlice()});
             controlFrameHandler(writer, control_frame_header, payload) catch |err| return switch (err) {
                 error.ReceivedCloseFrame => |err_cast| err_cast,
                 error.EndOfStream, error.UnexpectedWriteFailure => error.UnexpectedControlFrameResponseFailure,
@@ -288,7 +288,7 @@ fn readUntilDataFrameHeader(
             continue;
         }
         if (!basic_header.opcode.isDataFrame()) {
-            std.log.err("peer gave us opcode {}, which is not a valid opcode", .{@intFromEnum(basic_header.opcode)});
+            ws.log.err("peer gave us opcode {}, which is not a valid opcode", .{@intFromEnum(basic_header.opcode)});
             return error.InvalidMessage;
         }
 

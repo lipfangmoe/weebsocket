@@ -19,16 +19,16 @@ pub fn init(http_request: std.http.Client.Request) Connection {
 
 /// Flushes all data from the connection and closes the websocket.
 pub fn fail(self: *Connection, payload: ?ClosePayload) void {
-    std.log.info("failing the websocket connection", .{});
+    ws.log.info("failing the websocket connection", .{});
     self.deinit(payload);
 }
 
 /// Sends a close request to the server, and returns an iterator of the remaining messages that the server sends.
 pub fn deinitAndFlush(self: *Connection, payload: ?ClosePayload) FlushMessagesAfterCloseIterator {
     if (payload) |payload_nn| {
-        std.log.debug("deinitAndFlush({{ .status=.{s}, .payload='{s}' }})", .{ @tagName(payload_nn.status), payload_nn.reason.constSlice() });
+        ws.log.debug("deinitAndFlush({{ .status=.{s}, .payload='{s}' }})", .{ @tagName(payload_nn.status), payload_nn.reason.constSlice() });
         var message_writer = ws.message.AnyMessageWriter.initControl(self.writer(), payload_nn.reason.len + 2, .close, .random_mask) catch |err| {
-            std.log.err("error while writing close header: {}", .{err});
+            ws.log.err("error while writing close header: {}", .{err});
             self.forceDeinit();
             return FlushMessagesAfterCloseIterator{ .conn = null };
         };
@@ -36,19 +36,19 @@ pub fn deinitAndFlush(self: *Connection, payload: ?ClosePayload) FlushMessagesAf
             std.debug.panic("cannot send status {} over the wire", .{payload_nn.status});
         }
         message_writer.payloadWriter().writeInt(u16, @intFromEnum(payload_nn.status), .big) catch |err| {
-            std.log.err("error occurred while writing close status: {}", .{err});
+            ws.log.err("error occurred while writing close status: {}", .{err});
             self.forceDeinit();
             return FlushMessagesAfterCloseIterator{ .conn = null };
         };
         message_writer.payloadWriter().writeAll(payload_nn.reason.constSlice()) catch |err| {
-            std.log.err("error occurred while writing close reason: {}", .{err});
+            ws.log.err("error occurred while writing close reason: {}", .{err});
             self.forceDeinit();
             return FlushMessagesAfterCloseIterator{ .conn = null };
         };
     } else {
-        std.log.debug("deinitAndFlush(null)", .{});
+        ws.log.debug("deinitAndFlush(null)", .{});
         _ = ws.message.AnyMessageWriter.initControl(self.writer(), 0, .close, .random_mask) catch |err| {
-            std.log.err("error while writing close header: {}", .{err});
+            ws.log.err("error while writing close header: {}", .{err});
             self.forceDeinit();
             return FlushMessagesAfterCloseIterator{ .conn = null };
         };
@@ -65,10 +65,10 @@ pub fn deinit(self: *Connection, payload: ?ClosePayload) void {
         return;
     }
 
-    std.log.info("closing the websocket connection", .{});
+    ws.log.info("closing the websocket connection", .{});
     _ = self.deinitAndFlush(payload);
     _ = self.http_request.connection.?.reader().any().discard() catch |err| {
-        std.log.err("error while discarding stream after WS failed: {}", .{err});
+        ws.log.err("error while discarding stream after WS failed: {}", .{err});
     };
 
     self.forceDeinit();
@@ -115,7 +115,7 @@ pub fn readMessage(self: *Connection) ReadMessageError!ws.MessageReader {
             },
             error.EndOfStream => error.EndOfStream,
             else => {
-                std.log.err("internal error: {}", .{err});
+                ws.log.err("internal error: {}", .{err});
                 return error.Unknown;
             },
         };
@@ -137,7 +137,7 @@ pub fn writeMessage(self: *Connection, msg_type: ws.message.Type, message: []con
     message_writer.payloadWriter().writeAll(message) catch |err| return switch (err) {
         error.EndOfStream => error.EndOfStream,
         else => {
-            std.log.err("internal error: {}", .{err});
+            ws.log.err("internal error: {}", .{err});
             return error.Unknown;
         },
     };

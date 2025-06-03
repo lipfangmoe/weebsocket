@@ -9,6 +9,8 @@ pub const Client = client.Client;
 pub const MessageReader = message.AnyMessageReader;
 pub const MessageWriter = message.AnyMessageWriter;
 
+pub const log = std.log.scoped(.weebsocket);
+
 test {
     std.testing.refAllDeclsRecursive(@This());
 }
