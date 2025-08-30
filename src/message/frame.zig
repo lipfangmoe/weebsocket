@@ -27,14 +27,14 @@ pub const AnyFrameHeader = union(enum) {
             .{ .u80_unmasked = FrameHeader(.u80, false).init(final, opcode, @intCast(payload_len), mask) };
     }
 
-    pub fn readFrom(reader: std.io.AnyReader) !AnyFrameHeader {
-        const underlying_int = try reader.readInt(u16, .big);
+    pub fn readFrom(reader: *std.Io.Reader) !AnyFrameHeader {
+        const underlying_int = try reader.takeInt(u16, .big);
         const u16_unmasked: FrameHeader(.u16, false) = @bitCast(underlying_int);
         if (u16_unmasked.payload_len == 126) {
-            const extended_payload_len = try reader.readInt(u16, .big);
+            const extended_payload_len = try reader.takeInt(u16, .big);
 
             if (u16_unmasked.mask) {
-                const masking_key = try reader.readInt(u32, .big);
+                const masking_key = try reader.takeInt(u32, .big);
                 return .{
                     .u32_masked = FrameHeader(.u32, true){
                         .masking_key = masking_key,
@@ -65,10 +65,10 @@ pub const AnyFrameHeader = union(enum) {
             }
         }
         if (u16_unmasked.payload_len == 127) {
-            const extended_payload_len = try reader.readInt(u64, .big);
+            const extended_payload_len = try reader.takeInt(u64, .big);
 
             if (u16_unmasked.mask) {
-                const masking_key = try reader.readInt(u32, .big);
+                const masking_key = try reader.takeInt(u32, .big);
                 return .{
                     .u80_masked = FrameHeader(.u80, true){
                         .masking_key = masking_key,
@@ -100,7 +100,7 @@ pub const AnyFrameHeader = union(enum) {
         }
 
         if (u16_unmasked.mask) {
-            const masking_key = try reader.readInt(u32, .big);
+            const masking_key = try reader.takeInt(u32, .big);
             return .{
                 .u16_masked = FrameHeader(.u16, true){
                     .masking_key = masking_key,
@@ -119,7 +119,7 @@ pub const AnyFrameHeader = union(enum) {
         }
     }
 
-    pub fn writeTo(self: AnyFrameHeader, writer: std.io.AnyWriter) !void {
+    pub fn writeTo(self: AnyFrameHeader, writer: *std.Io.Writer) std.Io.Writer.Error!void {
         switch (self) {
             inline else => |header| {
                 const BackingInt = @typeInfo(@TypeOf(header)).@"struct".backing_integer.?;
@@ -285,9 +285,8 @@ pub const FrameHeaderSize = enum {
 
 test "read u16 unmasked" {
     const example_bytes: [2]u8 = .{ 0b10001000, 0b00101010 };
-    var stream = std.io.fixedBufferStream(&example_bytes);
-
-    const frame_header = (try AnyFrameHeader.readFrom(stream.reader().any())).u16_unmasked;
+    var stream = std.Io.Reader.fixed(&example_bytes);
+    const frame_header = (try AnyFrameHeader.readFrom(&stream)).u16_unmasked;
     try std.testing.expectEqual(true, frame_header.fin);
     try std.testing.expectEqual(false, frame_header.rsv1);
     try std.testing.expectEqual(false, frame_header.rsv2);
@@ -300,9 +299,8 @@ test "read u16 unmasked" {
 
 test "read u32 unmasked" {
     const example_bytes: [4]u8 = .{ 0b10001000, 0b01111110, 0xAA, 0xFF };
-    var stream = std.io.fixedBufferStream(&example_bytes);
-
-    const frame_header = (try AnyFrameHeader.readFrom(stream.reader().any())).u32_unmasked;
+    var stream = std.Io.Reader.fixed(&example_bytes);
+    const frame_header = (try AnyFrameHeader.readFrom(&stream)).u32_unmasked;
     try std.testing.expectEqual(true, frame_header.fin);
     try std.testing.expectEqual(false, frame_header.rsv1);
     try std.testing.expectEqual(false, frame_header.rsv2);
@@ -316,9 +314,8 @@ test "read u32 unmasked" {
 
 test "read u80 masked" {
     const example_bytes: [10 + 4]u8 = .{ 0b10001000, 0b11111111, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7, 0xA8, 0xB1, 0xB2, 0xB3, 0xB4 };
-    var stream = std.io.fixedBufferStream(&example_bytes);
-
-    const frame_header = (try AnyFrameHeader.readFrom(stream.reader().any())).u80_masked;
+    var stream = std.Io.Reader.fixed(&example_bytes);
+    const frame_header = (try AnyFrameHeader.readFrom(&stream)).u80_masked;
     try std.testing.expectEqual(true, frame_header.fin);
     try std.testing.expectEqual(false, frame_header.rsv1);
     try std.testing.expectEqual(false, frame_header.rsv2);
@@ -333,34 +330,33 @@ test "read u80 masked" {
 
 test "write u16 unmasked" {
     var buf: [2]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
+    var stream = std.Io.Writer.fixed(&buf);
 
     const any_frame_header = AnyFrameHeader.init(true, .close, 42, .unmasked);
 
     const expected: [2]u8 = .{ 0b10001000, 0b00101010 };
-    try any_frame_header.writeTo(stream.writer().any());
+    try any_frame_header.writeTo(&stream);
     try std.testing.expectEqual(expected, buf);
 }
 
 test "write u32 unmasked" {
     var buf: [4]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
+    var writer = std.Io.Writer.fixed(&buf);
 
     const any_frame_header = AnyFrameHeader.init(true, .close, 0xAAFF, .unmasked);
 
     const expected: [4]u8 = .{ 0b10001000, 0b01111110, 0xAA, 0xFF };
-    try any_frame_header.writeTo(stream.writer().any());
+    try any_frame_header.writeTo(&writer);
     try std.testing.expectEqual(expected, buf);
 }
 
 test "write u80 masked" {
     var buf: [10 + 4]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
+    var stream = std.Io.Writer.fixed(&buf);
 
     const any_frame_header = AnyFrameHeader.init(true, .close, 0xA1A2A3A4A5A6A7A8, .{ .fixed_mask = 0xB1B2B3B4 });
 
-    // mask is cryptographically random, cannot test it
     const expected_u80: [10 + 4]u8 = .{ 0b10001000, 0b11111111, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7, 0xA8, 0xB1, 0xB2, 0xB3, 0xB4 };
-    try any_frame_header.writeTo(stream.writer().any());
+    try any_frame_header.writeTo(&stream);
     try std.testing.expectEqual(expected_u80, buf);
 }

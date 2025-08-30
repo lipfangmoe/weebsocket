@@ -16,37 +16,37 @@ pub fn init(allocator: std.mem.Allocator) Client {
     return .{ .http_client = http_client };
 }
 
-const HandshakeError = error{NotWebsocketServer} || std.http.Client.Request.SendError || std.http.Client.Request.WaitError;
+const HandshakeError = error{NotWebsocketServer} || std.Io.Writer.Error || std.http.Client.Request.ReceiveHeadError;
 
 pub fn handshake(
     self: *Client,
     uri: std.Uri,
     extra_headers: ?[]const std.http.Header,
 ) HandshakeError!client.Connection {
-    var buf: [1000]u8 = undefined;
     const websocket_key = generateRandomWebsocketKey();
 
-    var headers = std.BoundedArray(std.http.Header, 100){};
-    headers.append(std.http.Header{ .name = "Upgrade", .value = "websocket" }) catch unreachable;
-    headers.append(std.http.Header{ .name = "Sec-WebSocket-Key", .value = &websocket_key }) catch unreachable;
-    headers.append(std.http.Header{ .name = "Sec-WebSocket-Version", .value = "13" }) catch unreachable;
+    var headers_buf: [100]std.http.Header = undefined;
+    var headers = std.ArrayList(std.http.Header).initBuffer(&headers_buf);
+
+    headers.appendBounded(std.http.Header{ .name = "Upgrade", .value = "websocket" }) catch unreachable;
+    headers.appendBounded(std.http.Header{ .name = "Sec-WebSocket-Key", .value = &websocket_key }) catch unreachable;
+    headers.appendBounded(std.http.Header{ .name = "Sec-WebSocket-Version", .value = "13" }) catch unreachable;
     if (extra_headers) |extra| {
-        try headers.appendSlice(extra);
+        try headers.appendSliceBounded(extra);
     }
-    var req = try self.http_client.open(.GET, uri, .{
-        .server_header_buffer = &buf,
+    var req = try self.http_client.request(.GET, uri, .{
         .headers = .{
             .connection = .{ .override = "Upgrade" },
         },
-        .extra_headers = headers.constSlice(),
+        .extra_headers = headers.items,
     });
     errdefer req.deinit();
 
-    try req.send();
-    try req.wait();
+    try req.sendBodiless();
+    const response = try req.receiveHead(&.{});
 
-    if (req.response.status != .switching_protocols) {
-        ws.log.err("expected status 101 SWITCHING PROTOCOLS, got {d} {s}", .{ @intFromEnum(req.response.status), req.response.status.phrase() orelse "{unknown}" });
+    if (response.head.status != .switching_protocols) {
+        ws.log.err("expected status 101 SWITCHING PROTOCOLS, got {d} {s}", .{ @intFromEnum(response.head.status), response.head.status.phrase() orelse "unknown" });
         return error.NotWebsocketServer;
     }
 
@@ -54,7 +54,7 @@ pub fn handshake(
     var upgrade_seen = false;
     var connection_seen = false;
     var accept_seen = false;
-    var headers_iter = req.response.iterateHeaders();
+    var headers_iter = response.head.iterateHeaders();
     while (headers_iter.next()) |header| {
         if (std.ascii.eqlIgnoreCase(header.name, "Upgrade")) {
             upgrade_seen = true;
@@ -110,12 +110,13 @@ fn generateRandomWebsocketKey() [b64_encoder.calcSize(16)]u8 {
 
 fn expectedWebsocketAcceptHeader(key: [b64_encoder.calcSize(16)]u8) [b64_encoder.calcSize(20)]u8 {
     const ws_guid = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
-    var concatted = std.BoundedArray(u8, key.len + ws_guid.len){};
-    concatted.appendSlice(&key) catch unreachable;
-    concatted.appendSlice(ws_guid) catch unreachable;
+    var buf: [key.len + ws_guid.len]u8 = undefined;
+    var concatted = std.ArrayList(u8).initBuffer(&buf);
+    concatted.appendSliceBounded(&key) catch unreachable;
+    concatted.appendSliceBounded(ws_guid) catch unreachable;
 
     var sha1 = std.crypto.hash.Sha1.init(.{});
-    sha1.update(concatted.constSlice());
+    sha1.update(concatted.items);
 
     const digest = sha1.finalResult();
     var out_buf: [b64_encoder.calcSize(digest.len)]u8 = undefined;

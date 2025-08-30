@@ -5,8 +5,8 @@ const std = @import("std");
 // runner.
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
-
     const optimize = b.standardOptimizeOption(.{});
+    const test_filters = b.option([]const []const u8, "test-filter", "additional filters") orelse &.{};
 
     const ws_module = b.addModule("weebsocket", .{
         .root_source_file = b.path("src/root.zig"),
@@ -14,19 +14,24 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    const test_compile_step = b.addTest(.{
-        .root_source_file = b.path("src/root.zig"),
+    const autobahn_client_module = b.addModule("autobahn_client", .{
+        .root_source_file = b.path("autobahn/client_test/src/autobahn_client.zig"),
+        .imports = &.{.{ .name = "weebsocket", .module = ws_module }},
         .target = target,
         .optimize = optimize,
     });
 
+    const test_compile_step = b.addTest(.{
+        .root_module = ws_module,
+        .use_llvm = true,
+        .filters = test_filters,
+    });
+
     const autobahn_client_compile_step = b.addExecutable(.{
         .name = "weebsocket",
-        .root_source_file = b.path("autobahn/client_test/src/autobahn_client.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = autobahn_client_module,
+        .use_llvm = true,
     });
-    autobahn_client_compile_step.root_module.addImport("weebsocket", ws_module);
 
     // zig build test
     const test_step = b.step("test", "Run unit tests");
