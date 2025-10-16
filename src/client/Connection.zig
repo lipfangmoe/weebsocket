@@ -134,11 +134,13 @@ pub fn printMessage(self: *Connection, msg_type: ws.message.Type, comptime fmt: 
 /// Writes a message.
 pub fn sendMessage(self: *Connection, msg_type: ws.message.Type, message: []const u8) SendMessageError!void {
     var message_writer = try self.writeMessageStream(msg_type, message.len);
-    message_writer.interface.writeAll(message) catch |err| return switch (err) {
-        else => {
-            ws.log.err("internal error: {}", .{err});
-            return error.WriteFailed;
-        },
+    message_writer.interface.writeAll(message) catch |err| {
+        ws.log.err("internal error: {}", .{err});
+        return error.WriteFailed;
+    };
+    message_writer.interface.flush() catch |err| {
+        ws.log.err("internal error: {}", .{err});
+        return error.WriteFailed;
     };
 }
 
