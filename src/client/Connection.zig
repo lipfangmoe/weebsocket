@@ -80,10 +80,6 @@ pub fn deinit(self: *Connection, payload: ?ClosePayload) void {
 
     ws.log.info("closing the websocket connection", .{});
     _ = self.deinitAndFlush(payload);
-    _ = self.http_request.connection.?.reader().discardRemaining() catch |err| {
-        ws.log.err("error while discarding stream after WS failed: {}", .{err});
-    };
-
     self.forceDeinit();
 }
 
