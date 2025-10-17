@@ -55,8 +55,13 @@ pub fn deinitAndFlush(self: *Connection, payload: ?ClosePayload) FlushMessagesAf
     } else {
         ws.log.debug("deinitAndFlush(null)", .{});
         var buf: [200]u8 = undefined;
-        _ = ws.message.SingleFrameMessageWriter.initControl(self.writer(), 0, .close, .random_mask, &buf) catch |err| {
+        var message_writer = ws.message.SingleFrameMessageWriter.initControl(self.writer(), 0, .close, .random_mask, &buf) catch |err| {
             ws.log.err("error while writing close header: {}", .{err});
+            self.forceDeinit();
+            return FlushMessagesAfterCloseIterator{ .conn = null };
+        };
+        message_writer.interface.flush() catch |err| {
+            ws.log.err("error occurred while writing close reason: {}", .{err});
             self.forceDeinit();
             return FlushMessagesAfterCloseIterator{ .conn = null };
         };
