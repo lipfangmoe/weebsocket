@@ -61,7 +61,7 @@ pub fn deinitAndFlush(self: *Connection, payload: ?ClosePayload) FlushMessagesAf
             return FlushMessagesAfterCloseIterator{ .conn = null };
         };
         message_writer.interface.flush() catch |err| {
-            ws.log.err("error occurred while writing close reason: {}", .{err});
+            ws.log.err("error occurred while writing close header: {}", .{err});
             self.forceDeinit();
             return FlushMessagesAfterCloseIterator{ .conn = null };
         };
