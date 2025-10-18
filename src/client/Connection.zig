@@ -88,6 +88,10 @@ pub fn deinit(self: *Connection, payload: ?ClosePayload) void {
 /// Frees all resources related to this connection, and immediately closes the TCP connection.
 pub fn forceDeinit(self: *Connection) void {
     self.self_closing = true;
+
+    // tell the stdlib that this connection should be closed rather than returned to a connection pool
+    self.http_request.connection.?.closing = true;
+
     self.http_request.deinit();
 }
 
