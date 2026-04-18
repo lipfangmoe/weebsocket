@@ -7,13 +7,15 @@ const ws = @import("../root.zig");
 const client = ws.client;
 const b64_encoder = std.base64.standard.Encoder;
 
+rng: std.Random.IoSource,
 http_client: std.http.Client,
 
 const Client = @This();
 
-pub fn init(allocator: std.mem.Allocator) Client {
-    const http_client = std.http.Client{ .allocator = allocator };
-    return .{ .http_client = http_client };
+pub fn init(io: std.Io, allocator: std.mem.Allocator) Client {
+    const http_client = std.http.Client{ .io = io, .allocator = allocator };
+    const rng = std.Random.IoSource{ .io = io };
+    return .{ .rng = rng, .http_client = http_client };
 }
 
 const HandshakeError = error{NotWebsocketServer} || std.Io.Writer.Error || std.http.Client.Request.ReceiveHeadError;
@@ -23,7 +25,8 @@ pub fn handshake(
     uri: std.Uri,
     extra_headers: ?[]const std.http.Header,
 ) HandshakeError!client.Connection {
-    const websocket_key = generateRandomWebsocketKey();
+    const rio: std.Random.IoSource = .{ .io = self.http_client.io };
+    const websocket_key = generateRandomWebsocketKey(rio.interface());
 
     var headers_buf: [100]std.http.Header = undefined;
     var headers = std.ArrayList(std.http.Header).initBuffer(&headers_buf);
@@ -91,18 +94,17 @@ pub fn handshake(
         return error.NotWebsocketServer;
     }
 
-    return client.Connection.init(req);
+    return client.Connection.init(req, self.rng.interface());
 }
 
 pub fn deinit(self: *Client) void {
     self.http_client.deinit();
 }
 
-fn generateRandomWebsocketKey() [b64_encoder.calcSize(16)]u8 {
-    var rand = std.Random.DefaultPrng.init(@bitCast(std.time.microTimestamp()));
+fn generateRandomWebsocketKey(rng: std.Random) [b64_encoder.calcSize(16)]u8 {
     var buf: [16]u8 = undefined;
     var out_buf: [b64_encoder.calcSize(16)]u8 = undefined;
-    rand.random().bytes(&buf);
+    rng.bytes(&buf);
     _ = b64_encoder.encode(&out_buf, &buf);
 
     return out_buf;

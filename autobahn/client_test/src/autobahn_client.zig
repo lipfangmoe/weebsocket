@@ -3,26 +3,21 @@ const ws = @import("weebsocket");
 
 pub const std_options: std.Options = .{ .log_level = .info };
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    const allocator = gpa.allocator();
-    defer _ = gpa.deinit();
+pub fn main(init: std.process.Init) !void {
+    try init.io.sleep(.fromSeconds(5), .awake);
 
-    // wait 5 seconds for autobanh server to be up
-    std.Thread.sleep(5 * std.time.ns_per_s);
-
-    defer updateReport(allocator) catch unreachable;
+    defer updateReport(init.io, init.gpa) catch unreachable;
 
     const specific_cases: ?[]const []const u8 = null; // can set to a specific test with &.{"1.1.6"}
 
     for (specific_cases orelse &all_cases) |case| {
         std.log.info("====== running case: {s} ======", .{case});
 
-        var client = ws.Client.init(allocator);
+        var client = ws.Client.init(init.io, init.gpa);
         defer client.deinit();
 
-        const uri_str = try std.fmt.allocPrint(allocator, "ws://localhost:9001/runCase?casetuple={s}&agent=weebsocket", .{case});
-        defer allocator.free(uri_str);
+        const uri_str = try std.fmt.allocPrint(init.gpa, "ws://localhost:9001/runCase?casetuple={s}&agent=weebsocket", .{case});
+        defer init.gpa.free(uri_str);
         std.log.info("establishing connection: {s}", .{uri_str});
         var connection = client.handshake(try std.Uri.parse(uri_str), null) catch |err| {
             std.log.err("error during handshake: {}", .{err});
@@ -73,9 +68,9 @@ fn echo(connection: *ws.Connection) !void {
     };
 }
 
-fn updateReport(allocator: std.mem.Allocator) !void {
+fn updateReport(io: std.Io, allocator: std.mem.Allocator) !void {
     std.log.info("updating report", .{});
-    var client = ws.Client.init(allocator);
+    var client = ws.Client.init(io, allocator);
     defer client.deinit();
     const uri = std.Uri.parse("ws://localhost:9001/updateReports?agent=weebsocket") catch unreachable;
     var connection = try client.handshake(uri, null);

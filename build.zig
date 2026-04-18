@@ -33,6 +33,18 @@ pub fn build(b: *std.Build) void {
         .use_llvm = true,
     });
 
+    // zig build example
+    //const example_step = b.step("example", "Build the example shown in the README");
+    //const example_module = b.createModule(.{
+    //    .root_source_file = b.path("./examples/example_from_readme.zig"),
+    //    .optimize = .Debug,
+    //    .target = target,
+    //    .imports = &.{.{ .name = "weebsocket", .module = ws_module }},
+    //});
+    //const example_exe = b.addExecutable(.{ .name = "example", .root_module = example_module, .use_llvm = false });
+    //const example_artifact = b.addInstallArtifact(example_exe, .{});
+    //example_step.dependOn(&example_artifact.step);
+
     // zig build test
     const test_step = b.step("test", "Run unit tests");
     const run_lib_unit_tests = b.addRunArtifact(test_compile_step);
@@ -47,4 +59,5 @@ pub fn build(b: *std.Build) void {
     const check_step = b.step("check", "Run the compiler without building");
     check_step.dependOn(&test_compile_step.step);
     check_step.dependOn(&autobahn_client_compile_step.step);
+    //check_step.dependOn(example_step);
 }

@@ -12,5 +12,6 @@ pub const MessageWriter = message.MessageWriter;
 pub const log = std.log.scoped(.weebsocket);
 
 test {
-    std.testing.refAllDeclsRecursive(@This());
+    _ = client;
+    _ = message;
 }

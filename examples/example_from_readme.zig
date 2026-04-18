@@ -1,25 +1,4 @@
-# weebsocket
-
-Zig Websocket Client (maybe Server one day). Does not implement any WebSocket extensions at the moment.
-
-## Features
-
-- Zero-alloc after initial handshake
-- API somewhat reminescent of `std.http`
-- Passes all autobahn tests (except compression, since that is an extension that we don't implement)
-  - Compression one day...?
-
-## Add to your Project
-
-To add this to your project, use the Zig Package Manager:
-
-```bash
-zig fetch --save 'git+https://codeberg.org/lipfang/weebsocket#main'
-```
-
-## Usage
-
-```const std = @import("std");
+const std = @import("std");
 const ws = @import("weebsocket");
 
 pub fn main(init: std.process.Init) !void {
@@ -54,13 +33,3 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 }
-```
-
-## Special Thanks
-
-- https://github.com/karlseguin/websocket.zig
-	- Being the original Websocket API that I looked at. Was very nice, but wanted something that had a closer API to the new `std.http` library
-	- Also, used the code from this as a framework for autobahn tests :)
-- https://github.com/crossbario/autobahn-testsuite
-    - Integration testing suite for websocket clients
-	- Solved a lot of bugs!

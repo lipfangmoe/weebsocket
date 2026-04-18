@@ -23,9 +23,9 @@ pub const UnfragmentedPayloadWriter = struct {
     err: ?WritePayloadError = null,
 
     /// Creates a message writer with a known length, aka an Unfragmented Message.
-    pub fn init(underlying_writer: *std.Io.Writer, message_len: usize, message_type: ws.message.Type, mask: ws.message.frame.Mask, buffer: []u8) WriteHeaderError!UnfragmentedPayloadWriter {
+    pub fn init(underlying_writer: *std.Io.Writer, message_len: usize, message_type: ws.message.Type, mask_strategy: ws.message.frame.MaskStrategy, buffer: []u8) WriteHeaderError!UnfragmentedPayloadWriter {
         const opcode = message_type.toOpcode();
-        const frame_header = ws.message.frame.AnyFrameHeader.init(true, opcode, message_len, mask);
+        const frame_header = ws.message.frame.AnyFrameHeader.init(true, opcode, message_len, mask_strategy);
         try frame_header.writeTo(underlying_writer);
         return .initWithHeader(underlying_writer, frame_header, buffer);
     }
@@ -48,10 +48,10 @@ pub const UnfragmentedPayloadWriter = struct {
         underlying_writer: *std.Io.Writer,
         payload_len: usize,
         opcode: ws.message.frame.Opcode,
-        mask: ws.message.frame.Mask,
+        mask_strategy: ws.message.frame.MaskStrategy,
         buffer: []u8,
     ) !UnfragmentedPayloadWriter {
-        const frame_header = ws.message.frame.AnyFrameHeader.init(true, opcode, payload_len, mask);
+        const frame_header = ws.message.frame.AnyFrameHeader.init(true, opcode, payload_len, mask_strategy);
         try frame_header.writeTo(underlying_writer);
         return .initWithHeader(underlying_writer, frame_header, buffer);
     }
@@ -117,12 +117,12 @@ pub const FragmentedMessageWriter = struct {
     interface: std.Io.Writer,
     underlying_writer: *std.Io.Writer,
     opcode: ws.message.frame.Opcode,
-    mask: ws.message.frame.Mask,
+    mask: ws.message.frame.MaskStrategy,
     err: ?WritePayloadError = null,
 
     /// Creates a message which can be written to over multiple frames. aka a Fragmented Message.
     /// Be sure to call `close()` before any other messages can be sent.
-    pub fn init(underlying_writer: *std.Io.Writer, message_type: ws.message.Type, mask: ws.message.frame.Mask, buffer: []u8) FragmentedMessageWriter {
+    pub fn init(underlying_writer: *std.Io.Writer, message_type: ws.message.Type, mask: ws.message.frame.MaskStrategy, buffer: []u8) FragmentedMessageWriter {
         return FragmentedMessageWriter{
             .underlying_writer = underlying_writer,
             .opcode = message_type.toOpcode(),
@@ -243,7 +243,7 @@ test "A single-frame masked text message" {
     var output_writer = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer output_writer.deinit();
     var message_writer_buf: [100]u8 = undefined;
-    var message_writer = try UnfragmentedPayloadWriter.init(&output_writer.writer, message_payload.len, .text, .{ .fixed_mask = 0x37fa213d }, &message_writer_buf);
+    var message_writer = try UnfragmentedPayloadWriter.init(&output_writer.writer, message_payload.len, .text, .{ .fixed = 0x37fa213d }, &message_writer_buf);
     try message_writer.interface.writeAll(message_payload);
     try message_writer.interface.flush();
 
@@ -276,7 +276,7 @@ test "(not in spec) A fragmented unmasked text message interrupted with a masked
     // simulate pong response in the middle of fragmented payload
     const pong_payload = "Hello";
     var pong_buf: [100]u8 = undefined;
-    var pong = try UnfragmentedPayloadWriter.initControl(&output.writer, pong_payload.len, .pong, .{ .fixed_mask = 0x37fa213d }, &pong_buf);
+    var pong = try UnfragmentedPayloadWriter.initControl(&output.writer, pong_payload.len, .pong, .{ .fixed = 0x37fa213d }, &pong_buf);
     try pong.interface.writeAll(pong_payload);
     try pong.interface.flush();
 
@@ -300,7 +300,7 @@ test "example that messed me up" {
     defer output.deinit();
     const close_reason = "invalid frame header";
     var buf: [100]u8 = undefined;
-    var message_writer = try UnfragmentedPayloadWriter.initControl(&output.writer, close_reason.len + 2, .close, .{ .fixed_mask = 0xd585b161 }, &buf);
+    var message_writer = try UnfragmentedPayloadWriter.initControl(&output.writer, close_reason.len + 2, .close, .{ .fixed = 0xd585b161 }, &buf);
     try message_writer.interface.writeInt(u16, @intFromEnum(ws.Connection.CloseStatus.protocol_error), .big);
     try message_writer.interface.writeAll(close_reason);
     try message_writer.interface.flush();
