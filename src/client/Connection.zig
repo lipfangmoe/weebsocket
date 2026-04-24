@@ -4,7 +4,6 @@ const frame = ws.message.frame;
 
 rng: std.Random,
 http_request: std.http.Client.Request,
-control_frame_handler: ws.message.ControlFrameHeaderHandlerFn,
 amt_read_from_request: usize = 0,
 peer_closing: bool = false,
 self_closing: bool = false,
@@ -12,10 +11,9 @@ self_closing: bool = false,
 const Connection = @This();
 
 pub fn init(http_request: std.http.Client.Request, rng: std.Random) Connection {
-    return Connection{
+    return .{
         .rng = rng,
         .http_request = http_request,
-        .control_frame_handler = &ws.message.defaultControlFrameHandler,
     };
 }
 
@@ -33,25 +31,24 @@ pub fn deinitAndFlush(self: *Connection, payload: ?ClosePayload) FlushMessagesAf
         }
         ws.log.debug("deinitAndFlush({{ .status=.{s}, .payload='{s}' }})", .{ @tagName(payload_nn.status), payload_nn.reason });
         var buf: [200]u8 = undefined;
-        var message_writer = ws.message.SingleFrameMessageWriter.initControl(self.writer(), payload_nn.reason.len + 2, .close, .{ .rng = self.rng }, &buf) catch |err| {
-            ws.log.err("error while writing close header: {}", .{err});
-            self.forceDeinit();
-            return FlushMessagesAfterCloseIterator{ .conn = null };
-        };
+        var message_writer: ws.message.SingleFrameMessageWriter = .initControl(self.writer(), payload_nn.reason.len + 2, .close, .{ .rng = self.rng }, &buf);
         if (!payload_nn.status.isSendable()) {
             std.debug.panic("cannot send status {} over the wire", .{payload_nn.status});
         }
-        message_writer.interface.writeInt(u16, @intFromEnum(payload_nn.status), .big) catch |err| {
+        message_writer.interface.writeInt(u16, @intFromEnum(payload_nn.status), .big) catch {
+            const err = message_writer.state.err;
             ws.log.err("error occurred while writing close status: {}", .{err});
             self.forceDeinit();
             return FlushMessagesAfterCloseIterator{ .conn = null };
         };
-        message_writer.interface.writeAll(payload_nn.reason) catch |err| {
+        message_writer.interface.writeAll(payload_nn.reason) catch {
+            const err = message_writer.state.err;
             ws.log.err("error occurred while writing close reason: {}", .{err});
             self.forceDeinit();
             return FlushMessagesAfterCloseIterator{ .conn = null };
         };
-        message_writer.interface.flush() catch |err| {
+        message_writer.interface.flush() catch {
+            const err = message_writer.state.err;
             ws.log.err("error occurred while writing close reason: {}", .{err});
             self.forceDeinit();
             return FlushMessagesAfterCloseIterator{ .conn = null };
@@ -59,12 +56,9 @@ pub fn deinitAndFlush(self: *Connection, payload: ?ClosePayload) FlushMessagesAf
     } else {
         ws.log.debug("deinitAndFlush(null)", .{});
         var buf: [200]u8 = undefined;
-        var message_writer = ws.message.SingleFrameMessageWriter.initControl(self.writer(), 0, .close, .{ .rng = self.rng }, &buf) catch |err| {
-            ws.log.err("error while writing close header: {}", .{err});
-            self.forceDeinit();
-            return FlushMessagesAfterCloseIterator{ .conn = null };
-        };
-        message_writer.interface.flush() catch |err| {
+        var message_writer: ws.message.SingleFrameMessageWriter = .initControl(self.writer(), 0, .close, .{ .rng = self.rng }, &buf);
+        message_writer.interface.flush() catch {
+            const err = message_writer.state.err;
             ws.log.err("error occurred while writing close header: {}", .{err});
             self.forceDeinit();
             return FlushMessagesAfterCloseIterator{ .conn = null };
@@ -122,20 +116,12 @@ pub const ReceiveMessageError = error{
 pub const SendMessageError = error{
     ServerClosed,
     EndOfStream,
-    WriteFailed,
-};
+} || ws.message.writer2.Error;
 
-/// Waits to receive a message. Automatically calls `.receiveHead`
-pub fn receiveMessage(self: *Connection) ReceiveMessageError!ws.MessageReader {
+/// Waits to receive a message.
+pub fn receiveMessage(self: *Connection) ws.MessageReader {
     var buf: [8000]u8 = undefined;
-    var message_reader = ws.MessageReader.init(self.reader(), .{ .rng = self.rng }, self.control_frame_handler, self.writer(), &buf);
-    message_reader.receiveHead() catch |err| switch (err) {
-        error.EndOfStream => return error.EndOfStream,
-        error.ReceivedCloseFrame => return error.ServerClosed,
-        error.InvalidMessage, error.PayloadTooLong => return error.InvalidMessage,
-        else => return error.Unknown,
-    };
-    return message_reader;
+    return .init(self.reader(), .default(.{ .rng = self.rng }, self.writer()), &buf);
 }
 
 /// Prints some bytes as a websocket message.
@@ -143,45 +129,45 @@ pub fn printMessage(self: *Connection, msg_type: ws.message.Type, comptime fmt: 
     const len = std.fmt.count(fmt, args);
 
     var buf: [8000]u8 = undefined;
-    var message_writer = try self.writeMessageStream(msg_type, &buf, len);
-    try message_writer.interface.print(fmt, args);
+    var message_writer = self.initMessageWriter(msg_type, &buf, len);
+    message_writer.interface.print(fmt, args) catch {
+        return message_writer.state.err;
+    };
 }
 
-/// Writes a message.
+/// Writes some bytes as a websocket message.
 pub fn sendMessage(self: *Connection, msg_type: ws.message.Type, message: []const u8) SendMessageError!void {
     var buf: [8000]u8 = undefined;
-    var message_writer = try self.writeMessageStream(msg_type, &buf, message.len);
-    message_writer.interface.writeAll(message) catch |err| {
-        ws.log.err("internal error: {}", .{err});
-        return error.WriteFailed;
+    var message_writer = self.initMessageWriter(msg_type, &buf, message.len);
+    message_writer.interface.writeAll(message) catch {
+        return message_writer.state.err;
     };
-    message_writer.interface.flush() catch |err| {
-        ws.log.err("internal error: {}", .{err});
-        return error.WriteFailed;
+    message_writer.interface.flush() catch {
+        return message_writer.state.err;
     };
 }
 
-/// Writes a stream of bytes as a websocket message. Don't forget to flush!
-pub fn writeMessageStream(self: *Connection, msg_type: ws.message.Type, buf: []u8, message_length: usize) SendMessageError!ws.message.SingleFrameMessageWriter {
+/// Creates writer which encodes the contents as a websocket payload and writes it to the underlying writer. Errors are accessible via `writer.state.err`
+///
+/// Don't forget to flush!
+pub fn initMessageWriter(self: *Connection, msg_type: ws.message.Type, buf: []u8, message_length: usize) ws.message.SingleFrameMessageWriter {
     if (self.self_closing) {
         std.debug.panic("Trying to write message after closing self", .{});
     }
-    return try ws.MessageWriter.init(self.writer(), message_length, msg_type, .{ .rng = self.rng }, buf);
+    return .init(self.writer(), message_length, msg_type, .{ .rng = self.rng }, buf);
 }
 
 /// Creates a MessageWriter, which writes a Websocket Frame Header, and then
 /// returns a Writer which can be used to write the websocket payload.
 ///
-/// This function should only be used when the length is extremely long, and calculating
-/// the length of the buffer ahead-of-time would be extremely difficult.
-/// If possible, it's recommended to instead use self.sendMessage() or self.writeMessageStream().
-///
-/// Also, you must call `.close()` on the MessageWriter when you are finished writing the message.
-pub fn writeMessageStreamUnknownLength(self: *Connection, msg_type: ws.message.Type, buf: []u8) ws.message.MultiFrameMessageWriter {
+/// This function should only be used when the length may be quite long, and calculating
+/// the length of the buffer ahead-of-time would be difficult.
+/// If possible, it's recommended to instead use self.sendMessage() or self.createMessageStream().
+pub fn createMessageStreamUnknownLength(self: *Connection, msg_type: ws.message.Type, buf: []u8) ws.message.MultiFrameMessageWriter {
     if (self.self_closing) {
         std.debug.panic("Trying to write message after closing self", .{});
     }
-    return ws.MessageWriter.initUnknownLength(self.writer(), msg_type, .{ .rng = self.rng }, buf);
+    return .init(self.writer(), msg_type, .{ .rng = self.rng }, buf);
 }
 
 fn reader(self: *Connection) *std.Io.Reader {

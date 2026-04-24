@@ -9,7 +9,7 @@ pub const ReadHeaderError = error{
     PayloadTooLong,
     UnexpectedReadFailure,
     UnexpectedControlFrameResponseFailure,
-};
+} || std.Io.Cancelable;
 pub const StreamPayloadError = error{
     EndOfStream,
     PayloadTooLong,
@@ -17,7 +17,7 @@ pub const StreamPayloadError = error{
     UnexpectedReadFailure,
     UnexpectedWriteFailure,
     InvalidUtf8,
-} || std.Io.Writer.Error;
+} || std.Io.Cancelable || std.Io.Writer.Error;
 pub const StreamError = ReadHeaderError || StreamPayloadError;
 
 pub const MessageReader = struct {
@@ -68,7 +68,7 @@ pub const MessageReader = struct {
                 .fragmented => |*fragmented| &fragmented.interface,
             };
         } else {
-            std.debug.panic("payloadReader() must be called after `waitForMessage`", .{});
+            std.debug.panic("payloadReader() must be called after `receiveHead`", .{});
         }
     }
 
@@ -306,6 +306,7 @@ pub const UnfragmentedPayloadReader = struct {
             .ok => |*ok| ok,
         };
 
+        std.log.info("a", .{});
         const payload_len = self.frame_header.getPayloadLen() catch {
             return error.PayloadTooLong;
         };
@@ -320,6 +321,7 @@ pub const UnfragmentedPayloadReader = struct {
             return error.EndOfStream;
         }
 
+        std.log.info("b", .{});
         var buf: [1000]u8 = undefined;
         var buf_writer = std.Io.Writer.fixed(&buf);
         const bytes_streamed = self.underlying_reader.stream(&buf_writer, limit.min(.limited(remaining_payload)).min(.limited(buf.len))) catch |err| switch (err) {
@@ -338,6 +340,7 @@ pub const UnfragmentedPayloadReader = struct {
             error.WriteFailed => unreachable,
         };
 
+        std.log.info("c", .{});
         // masking
         if (self.frame_header.asMostBasicHeader().mask) {
             const masking_key = self.frame_header.getMaskingKey() orelse {
@@ -348,6 +351,7 @@ pub const UnfragmentedPayloadReader = struct {
         }
         state.payload_idx += bytes_streamed;
 
+        std.log.info("d", .{});
         if (self.frame_header.asMostBasicHeader().opcode == .text) {
             var next_partial_codepoint_buf: [3]u8 = undefined;
             var next_partial_codepoint = std.ArrayList(u8).initBuffer(&next_partial_codepoint_buf);
@@ -360,6 +364,7 @@ pub const UnfragmentedPayloadReader = struct {
             state.prev_partial_codepoint_len = next_partial_codepoint.items.len;
         }
 
+        std.log.info("e", .{});
         // this recursion has max depth of 1 since the buffer already contains `bytes_streamed` bytes
         try writer.writeAll(buf_writer.buffered());
         return bytes_streamed;
