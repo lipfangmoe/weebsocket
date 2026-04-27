@@ -98,18 +98,7 @@ pub fn drainRemainingMessages(self: *Connection) void {
     var buf: [8000]u8 = undefined;
     while (true) {
         var msg = self.receiveMessage(&buf);
-        _ = msg.getHeader() catch {
-            switch (msg.state.err) {
-                error.InvalidMessage, error.PayloadTooLong, error.InvalidUtf8, error.ReceivedCloseFrame, error.EndOfFrame => continue,
-                error.EndOfStream, error.UnderlyingReadFailed, error.UnderlyingWriteFailed, error.UnderlyingControlFrameWriteFailed, error.Canceled => break,
-            }
-        };
-        _ = msg.interface.discardRemaining() catch {
-            switch (msg.state.err) {
-                error.InvalidMessage, error.PayloadTooLong, error.InvalidUtf8, error.ReceivedCloseFrame, error.EndOfFrame => continue,
-                error.EndOfStream, error.UnderlyingReadFailed, error.UnderlyingWriteFailed, error.UnderlyingControlFrameWriteFailed, error.Canceled => break,
-            }
-        };
+        _ = msg.interface.discardRemaining() catch break;
     }
 }
 
@@ -220,6 +209,14 @@ fn reader(self: *Connection) *std.Io.Reader {
 
 fn writer(self: *Connection) *std.Io.Writer {
     return self.http_request.connection.?.writer();
+}
+
+pub fn connectionReaderError(self: *const Connection) ?std.http.Client.Connection.ReadError {
+    return self.http_request.connection.?.getReadError();
+}
+
+pub fn connectionWriterError(self: *const Connection) ?std.http.Client.Connection.ReadError {
+    return self.http_request.connection.?.getReadError();
 }
 
 pub const ClosePayload = struct {
