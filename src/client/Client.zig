@@ -25,8 +25,7 @@ pub fn handshake(
     uri: std.Uri,
     extra_headers: ?[]const std.http.Header,
 ) HandshakeError!client.Connection {
-    const rio: std.Random.IoSource = .{ .io = self.http_client.io };
-    const websocket_key = generateRandomWebsocketKey(rio.interface());
+    const websocket_key = generateRandomWebsocketKey(self.rng.interface());
 
     var headers_buf: [100]std.http.Header = undefined;
     var headers = std.ArrayList(std.http.Header).initBuffer(&headers_buf);

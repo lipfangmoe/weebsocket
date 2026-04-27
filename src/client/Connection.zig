@@ -17,21 +17,14 @@ pub fn init(http_request: std.http.Client.Request, rng: std.Random) Connection {
     };
 }
 
-/// Flushes all data from the connection and closes the websocket.
-pub fn fail(self: *Connection, payload: ?ClosePayload) void {
-    ws.log.info("failing the websocket connection", .{});
-    self.deinit(payload);
-}
-
-/// Sends a close request to the server, and returns an iterator of the remaining messages that the server sends.
-pub fn deinitAndFlush(self: *Connection, payload: ?ClosePayload) FlushMessagesAfterCloseIterator {
+/// Sends a close request to the server. Returns true if the connection is still open, so the client can drain remaining messages.
+pub fn deinitAndFlush(self: *Connection, payload: ?ClosePayload) bool {
     if (payload) |payload_nn| {
         if (payload_nn.reason.len > 123) {
-            std.debug.panic("ClosePayload reason may not be longer than 123 bytes (len={})", .{payload_nn.reason.len});
+            std.debug.panic("ClosePayload reason may not be longer than 123 bytes. (len={})", .{payload_nn.reason.len});
         }
-        ws.log.debug("deinitAndFlush({{ .status=.{s}, .payload='{s}' }})", .{ @tagName(payload_nn.status), payload_nn.reason });
         var buf: [200]u8 = undefined;
-        var message_writer: ws.message.SingleFrameMessageWriter = .initControl(self.writer(), payload_nn.reason.len + 2, .close, .{ .rng = self.rng }, &buf);
+        var message_writer: ws.SingleFrameMessageWriter = .initControl(self.writer(), payload_nn.reason.len + 2, .close, .{ .rng = self.rng }, &buf);
         if (!payload_nn.status.isSendable()) {
             std.debug.panic("cannot send status {} over the wire", .{payload_nn.status});
         }
@@ -39,46 +32,85 @@ pub fn deinitAndFlush(self: *Connection, payload: ?ClosePayload) FlushMessagesAf
             const err = message_writer.state.err;
             ws.log.err("error occurred while writing close status: {}", .{err});
             self.forceDeinit();
-            return FlushMessagesAfterCloseIterator{ .conn = null };
+            return false;
         };
         message_writer.interface.writeAll(payload_nn.reason) catch {
             const err = message_writer.state.err;
             ws.log.err("error occurred while writing close reason: {}", .{err});
             self.forceDeinit();
-            return FlushMessagesAfterCloseIterator{ .conn = null };
+            return false;
         };
         message_writer.interface.flush() catch {
             const err = message_writer.state.err;
             ws.log.err("error occurred while writing close reason: {}", .{err});
             self.forceDeinit();
-            return FlushMessagesAfterCloseIterator{ .conn = null };
+            return false;
         };
     } else {
-        ws.log.debug("deinitAndFlush(null)", .{});
-        var buf: [200]u8 = undefined;
-        var message_writer: ws.message.SingleFrameMessageWriter = .initControl(self.writer(), 0, .close, .{ .rng = self.rng }, &buf);
-        message_writer.interface.flush() catch {
-            const err = message_writer.state.err;
-            ws.log.err("error occurred while writing close header: {}", .{err});
+        var buf: [50]u8 = undefined;
+        var control_message_writer: ws.SingleFrameMessageWriter = .initControl(self.writer(), 2, .close, .{ .rng = self.rng }, &buf);
+        control_message_writer.interface.writeInt(u16, @intFromEnum(ws.message.ControlFrameHandler.CloseStatus.normal), .big) catch {
+            std.debug.assert(control_message_writer.state == .err);
+
+            ws.log.err("error occurred writing close reason: {}", .{control_message_writer.state.err});
             self.forceDeinit();
-            return FlushMessagesAfterCloseIterator{ .conn = null };
+            return false;
+        };
+        control_message_writer.interface.flush() catch {
+            std.debug.assert(control_message_writer.state == .err);
+
+            ws.log.err("error occurred writing close reason: {}", .{control_message_writer.state.err});
+            self.forceDeinit();
+            return false;
         };
     }
 
     self.self_closing = true;
 
-    return FlushMessagesAfterCloseIterator{ .conn = self };
+    return true;
 }
 
-/// Sends a close request to the server, and waits for a close response. `payload` is an optional byte sequence to send to the server.
-pub fn deinit(self: *Connection, payload: ?ClosePayload) void {
+/// Sends a close request to the server, and waits for a close response.
+/// `payload` is an optional byte sequence to send to the server.
+pub fn deinit(self: *Connection, io: std.Io, payload: ?ClosePayload) void {
     if (self.self_closing) {
         return;
     }
 
-    ws.log.info("closing the websocket connection", .{});
-    _ = self.deinitAndFlush(payload);
-    self.forceDeinit();
+    const open = self.deinitAndFlush(payload);
+
+    if (open) {
+        const SelectT = union(enum) {
+            timeout: error{Canceled}!void,
+            drain: void,
+        };
+        var buf: [2]SelectT = undefined;
+        var select: std.Io.Select(SelectT) = .init(io, &buf);
+        select.async(.timeout, std.Io.sleep, .{ io, .fromSeconds(1), .awake });
+        select.async(.drain, drainRemainingMessages, .{self});
+        _ = select.await() catch {};
+        _ = select.cancelDiscard();
+        self.forceDeinit();
+    }
+}
+
+pub fn drainRemainingMessages(self: *Connection) void {
+    var buf: [8000]u8 = undefined;
+    while (true) {
+        var msg = self.receiveMessage(&buf);
+        _ = msg.getHeader() catch {
+            switch (msg.state.err) {
+                error.InvalidMessage, error.PayloadTooLong, error.InvalidUtf8, error.ReceivedCloseFrame, error.EndOfFrame => continue,
+                error.EndOfStream, error.UnderlyingReadFailed, error.UnderlyingWriteFailed, error.UnderlyingControlFrameWriteFailed, error.Canceled => break,
+            }
+        };
+        _ = msg.interface.discardRemaining() catch {
+            switch (msg.state.err) {
+                error.InvalidMessage, error.PayloadTooLong, error.InvalidUtf8, error.ReceivedCloseFrame, error.EndOfFrame => continue,
+                error.EndOfStream, error.UnderlyingReadFailed, error.UnderlyingWriteFailed, error.UnderlyingControlFrameWriteFailed, error.Canceled => break,
+            }
+        };
+    }
 }
 
 /// It is highly recommended to call `deinit()` instead, but this function allows to terminate the HTTP connection immediately.
@@ -88,7 +120,9 @@ pub fn forceDeinit(self: *Connection) void {
     self.self_closing = true;
 
     // tell the stdlib that this connection should be closed rather than returned to a connection pool
-    self.http_request.connection.?.closing = true;
+    if (self.http_request.connection) |conn| {
+        conn.closing = true;
+    }
 
     self.http_request.deinit();
 }
@@ -109,19 +143,29 @@ pub fn ping(self: *Connection, payload: ?[]u8) !void {
 
 pub const ReceiveMessageError = error{
     ServerClosed,
-    InvalidMessage,
     EndOfStream,
     Unknown,
-};
+} || ws.message.reader2.MessageReader.Error;
+pub const ReceiveMessageAllocError = error{StreamTooLong} || ReceiveMessageError || std.mem.Allocator.Error;
 pub const SendMessageError = error{
     ServerClosed,
     EndOfStream,
-} || ws.message.writer2.Error;
+} || ws.message.writer.Error;
 
-/// Waits to receive a message.
-pub fn receiveMessage(self: *Connection) ws.MessageReader {
+/// Waits to receive a message, returns a reader for the payload
+pub fn receiveMessage(self: *Connection, buf: []u8) ws.MessageReader {
+    return .init(self.reader(), .default(.{ .rng = self.rng }, self.writer()), buf);
+}
+
+/// Waits to receive a message, returns the payload content
+pub fn receiveMessageAlloc(self: *Connection, allocator: std.mem.Allocator, limit: std.Io.Limit) ReceiveMessageAllocError![]u8 {
     var buf: [8000]u8 = undefined;
-    return .init(self.reader(), .default(.{ .rng = self.rng }, self.writer()), &buf);
+    const message_reader: ws.MessageReader = .init(self.reader(), .default(.{ .rng = self.rng }, self.writer()), &buf);
+    return message_reader.interface.allocRemaining(allocator, limit) catch |err| switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.ReadFailed => message_reader.state.err,
+        error.StreamTooLong => error.StreamTooLong,
+    };
 }
 
 /// Prints some bytes as a websocket message.
@@ -179,7 +223,7 @@ fn writer(self: *Connection) *std.Io.Writer {
 }
 
 pub const ClosePayload = struct {
-    status: CloseStatus,
+    status: ws.message.ControlFrameHandler.CloseStatus,
     /// Max size is 123 bytes
     reason: []const u8,
 
@@ -192,107 +236,10 @@ pub const ClosePayload = struct {
     }
 
     /// Max size for reason is 123 bytes.
-    pub fn initWithStatus(status: CloseStatus, reason: []const u8) ClosePayload {
+    pub fn initWithStatus(status: ws.message.ControlFrameHandler.CloseStatus, reason: []const u8) ClosePayload {
         return .{
             .status = status,
             .reason = reason,
         };
     }
 };
-
-pub const CloseStatus = enum(u16) {
-    normal = 1000,
-    going_away = 1001,
-    protocol_error = 1002,
-    cannot_accept = 1003,
-    inconsistent_format = 1007,
-    policy_violation = 1008,
-    message_too_large = 1009,
-    expected_extension = 1010,
-
-    // not sendable over the wire
-    no_status_code_present = 1005,
-    closed_abnormally = 1006,
-    invalid_tls_signature = 1015,
-    _,
-
-    pub fn isSendable(self: CloseStatus) bool {
-        return switch (self) {
-            .no_status_code_present,
-            .closed_abnormally,
-            .invalid_tls_signature,
-            => false,
-
-            .normal,
-            .going_away,
-            .protocol_error,
-            .cannot_accept,
-            .inconsistent_format,
-            .policy_violation,
-            .message_too_large,
-            .expected_extension,
-            => true,
-
-            else => switch (@intFromEnum(self)) {
-                0...999 => false,
-                1000...2999 => false,
-                3000...4999 => true,
-                else => false,
-            },
-        };
-    }
-};
-
-/// An iterator for messages sent after the Closing Handshake has started. Should continue to call `next()` until an error is encountered,
-/// one should not stop calling next if `null` is encountered.
-pub const FlushMessagesAfterCloseIterator = struct {
-    conn: ?*Connection,
-
-    pub fn next(self: *FlushMessagesAfterCloseIterator) error{ EndOfStream, Unknown }!?ws.message.MessageReader {
-        if (self.conn) |conn| {
-            return conn.receiveMessage() catch |err| {
-                switch (err) {
-                    error.ServerClosed => return null,
-                    error.InvalidMessage => return null,
-                    else => |errr| return errr,
-                }
-            };
-        }
-        return null;
-    }
-};
-
-fn fmtCompactFn(data: []const u8, comptime _: []const u8, _: std.fmt.FormatOptions, fmt_writer: anytype) !void {
-    if (data.len == 0) {
-        return;
-    }
-    if (std.unicode.utf8ValidateSlice(data)) {
-        try fmt_writer.print("{s}", .{data});
-        return;
-    }
-
-    var char_count: usize = 1;
-    var last_char: u8 = data[0];
-    for (data[1..]) |char| {
-        if (char == last_char) {
-            char_count += 1;
-            continue;
-        }
-        if (char_count == 1) {
-            try fmt_writer.print("{x:0>2}, ", .{last_char});
-        } else {
-            try fmt_writer.print("{x:0>2}**{}, ", .{ last_char, char_count });
-        }
-        last_char = char;
-        char_count = 1;
-    }
-    if (char_count == 1) {
-        try fmt_writer.print("{x:0>2}", .{last_char});
-    } else {
-        try fmt_writer.print("{x:0>2}**{}", .{ last_char, char_count });
-    }
-}
-
-fn fmtCompact(data: []const u8) std.fmt.Formatter(fmtCompactFn) {
-    return .{ .data = data };
-}

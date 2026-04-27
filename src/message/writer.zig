@@ -1,43 +1,31 @@
 const std = @import("std");
 const ws = @import("../root.zig");
 
-pub const WriteHeaderError = error{WriteFailed};
-pub const WritePayloadError = error{ WriteFailed, PayloadTooLong, UnexpectedWriteFailure };
-pub const WriteError = WriteHeaderError || WritePayloadError;
+pub const Error = error{ Overflow, EndOfFrame, UnderlyingWriteFailed } || std.Io.Cancelable;
 
-pub const MessageWriter = struct {
-    pub const init = UnfragmentedPayloadWriter.init;
-    pub const initUnknownLength = FragmentedMessageWriter.init;
-};
-
-/// Represents an outgoing message which will only span one frame.
+/// Represents an outgoing message which will only span one frame. Errors can be found in `.state.err`.
 ///
 /// Noteworthy that the flush implementation of this writer will *also* flush the underlying writer (aka the websocket buffer).
-///
-/// Don't forget to flush!
-pub const UnfragmentedPayloadWriter = struct {
+pub const UnfragmentedMessageWriter = struct {
     interface: std.Io.Writer,
     underlying_writer: *std.Io.Writer,
-    frame_header: ws.message.frame.AnyFrameHeader,
-    payload_bytes_written: usize,
-    err: ?WritePayloadError = null,
+    header: ws.message.frame.AnyFrameHeader,
+    state: State = .writing_header,
 
     /// Creates a message writer with a known length, aka an Unfragmented Message.
-    pub fn init(underlying_writer: *std.Io.Writer, message_len: usize, message_type: ws.message.Type, mask_strategy: ws.message.frame.MaskStrategy, buffer: []u8) WriteHeaderError!UnfragmentedPayloadWriter {
+    pub fn init(underlying_writer: *std.Io.Writer, message_len: usize, message_type: ws.message.Type, mask_strategy: ws.message.frame.MaskStrategy, buffer: []u8) UnfragmentedMessageWriter {
         const opcode = message_type.toOpcode();
-        const frame_header = ws.message.frame.AnyFrameHeader.init(true, opcode, message_len, mask_strategy);
-        try frame_header.writeTo(underlying_writer);
-        return .initWithHeader(underlying_writer, frame_header, buffer);
+        const header = ws.message.frame.AnyFrameHeader.init(true, opcode, message_len, mask_strategy);
+        return .initWithHeader(underlying_writer, header, buffer);
     }
 
-    pub fn initWithHeader(underlying_writer: *std.Io.Writer, frame_header: ws.message.frame.AnyFrameHeader, buffer: []u8) UnfragmentedPayloadWriter {
-        return UnfragmentedPayloadWriter{
+    pub fn initWithHeader(underlying_writer: *std.Io.Writer, header: ws.message.frame.AnyFrameHeader, buffer: []u8) UnfragmentedMessageWriter {
+        return UnfragmentedMessageWriter{
             .underlying_writer = underlying_writer,
-            .frame_header = frame_header,
-            .payload_bytes_written = 0,
-            .interface = std.Io.Writer{
+            .header = header,
+            .interface = .{
                 .buffer = buffer,
-                .vtable = &std.Io.Writer.VTable{ .drain = drainFn, .flush = flushFn },
+                .vtable = &.{ .drain = drainFn, .flush = flushFn },
             },
         };
     }
@@ -50,187 +38,264 @@ pub const UnfragmentedPayloadWriter = struct {
         opcode: ws.message.frame.Opcode,
         mask_strategy: ws.message.frame.MaskStrategy,
         buffer: []u8,
-    ) !UnfragmentedPayloadWriter {
+    ) UnfragmentedMessageWriter {
         const frame_header = ws.message.frame.AnyFrameHeader.init(true, opcode, payload_len, mask_strategy);
-        try frame_header.writeTo(underlying_writer);
         return .initWithHeader(underlying_writer, frame_header, buffer);
     }
 
     fn drainFn(writer: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
-        const self: *UnfragmentedPayloadWriter = @alignCast(@fieldParentPtr("interface", writer));
-        return drain(self, data, splat) catch return error.WriteFailed;
+        const self: *UnfragmentedMessageWriter = @alignCast(@fieldParentPtr("interface", writer));
+        return drain(self, data, splat) catch |err| {
+            self.state = .{ .err = err };
+            return error.WriteFailed;
+        };
     }
 
-    fn drain(self: *UnfragmentedPayloadWriter, data: []const []const u8, splat: usize) WriteError!usize {
-        const payload_len = self.frame_header.getPayloadLen() catch std.debug.panic("overflow", .{});
-        const remaining_bytes = payload_len - self.payload_bytes_written;
-
-        if (remaining_bytes == 0) {
-            const bytes_trying_to_write = self.interface.end + std.Io.Writer.countSplat(data, splat);
-            if (bytes_trying_to_write > 0) {
-                ws.log.err("attempted to call write when the payload is already fully written", .{});
-                return error.WriteFailed;
-            }
-        }
-
-        // do simple write if no mask
-        if (!self.frame_header.asMostBasicHeader().mask) {
-            const n = try self.underlying_writer.writeSplatHeaderLimit(self.interface.buffered(), data, splat, .limited(remaining_bytes));
-            return self.interface.consume(n);
-        }
-
-        const masking_key = self.frame_header.getMaskingKey() orelse std.debug.panic("invalid state: mask bit is set but header does not have a masking key", .{});
-
-        // mask while writing
-        var masked_buf: [8000]u8 = undefined;
-        const max_bytes = @min(remaining_bytes, masked_buf.len);
-        var buf_writer = std.Io.Writer.fixed(&masked_buf);
-        _ = try buf_writer.writeSplatHeaderLimit(self.interface.buffered(), data, splat, .limited(max_bytes));
-        ws.message.mask_unmask(self.payload_bytes_written, masking_key, buf_writer.buffered());
-        const n = try self.underlying_writer.write(buf_writer.buffered());
-
-        self.payload_bytes_written += n;
-        return self.interface.consume(n);
+    fn drain(self: *UnfragmentedMessageWriter, data: []const []const u8, splat: usize) Error!usize {
+        return switch (self.state) {
+            .writing_header => try self.writeHeader(),
+            .writing_payload => try self.writePayload(data, splat),
+            .complete => if (self.interface.buffered().len + std.Io.Writer.countSplat(data, splat) > 0)
+                return error.EndOfFrame
+            else
+                0,
+            .err => |err| return err,
+        };
     }
 
     fn flushFn(writer: *std.Io.Writer) std.Io.Writer.Error!void {
-        const self: *UnfragmentedPayloadWriter = @alignCast(@fieldParentPtr("interface", writer));
+        const self: *UnfragmentedMessageWriter = @alignCast(@fieldParentPtr("interface", writer));
+        switch (self.state) {
+            .writing_header => {
+                _ = self.writeHeader() catch |err| {
+                    self.state = .{ .err = err };
+                    return error.WriteFailed;
+                };
+            },
+            else => {},
+        }
+
         try self.interface.defaultFlush();
-        try self.underlying_writer.flush();
+        self.underlying_writer.flush() catch {
+            self.state = .{ .err = error.UnderlyingWriteFailed };
+            return error.WriteFailed;
+        };
     }
 
-    /// Writes entirely null bytes for the remainder of the payload
-    pub fn discard(self: *UnfragmentedPayloadWriter) WritePayloadError!void {
-        const payload_len = self.frame_header.getPayloadLen() catch return error.PayloadTooLong;
-        const remaining_bytes = payload_len - self.payload_bytes_written;
+    fn writeHeader(self: *UnfragmentedMessageWriter) Error!usize {
+        std.debug.assert(self.state == .writing_header);
 
-        try self.interface.splatByteAll(0, remaining_bytes);
+        self.header.writeTo(self.underlying_writer) catch return error.UnderlyingWriteFailed;
+        self.state = .{ .writing_payload = 0 };
+
+        return 0;
     }
+
+    fn writePayload(self: *UnfragmentedMessageWriter, data: []const []const u8, splat: usize) Error!usize {
+        std.debug.assert(self.state == .writing_payload);
+        const payload_len = try self.header.getPayloadLen();
+        const n = try payloadDrain(&self.interface, self.underlying_writer, payload_len, self.state.writing_payload, self.header.getMaskingKey(), data, splat);
+        self.state.writing_payload += n;
+        const consumed_from_data = self.interface.consume(n);
+
+        if (self.state.writing_payload == payload_len) {
+            self.state = .complete;
+        }
+        return consumed_from_data;
+    }
+
+    pub const State = union(enum) {
+        writing_header: void,
+        writing_payload: u64, // u64 is how many bytes have been written
+        complete: void,
+        err: Error,
+    };
 };
 
-/// Represents an outgoing message that may span multiple frames.
+/// Represents an outgoing message that may span multiple frames. Errors can be found in `.state.err`.
 ///
 /// Noteworthy that the flush implementation of this writer will *also* flush the underlying writer (aka the websocket buffer)
-///
-/// Don't forget to flush, and close!
 pub const FragmentedMessageWriter = struct {
     interface: std.Io.Writer,
     underlying_writer: *std.Io.Writer,
     opcode: ws.message.frame.Opcode,
-    mask: ws.message.frame.MaskStrategy,
-    err: ?WritePayloadError = null,
+    mask_strategy: ws.message.frame.MaskStrategy,
+    state: State,
 
-    /// Creates a message which can be written to over multiple frames. aka a Fragmented Message.
-    /// Be sure to call `close()` before any other messages can be sent.
-    pub fn init(underlying_writer: *std.Io.Writer, message_type: ws.message.Type, mask: ws.message.frame.MaskStrategy, buffer: []u8) FragmentedMessageWriter {
-        return FragmentedMessageWriter{
+    pub fn init(underlying_writer: *std.Io.Writer, message_type: ws.message.Type, mask_strategy: ws.message.frame.MaskStrategy, buffer: []u8) FragmentedMessageWriter {
+        return .{
+            .interface = .{
+                .buffer = buffer,
+                .vtable = &.{ .drain = drainFn, .flush = flush },
+            },
             .underlying_writer = underlying_writer,
             .opcode = message_type.toOpcode(),
-            .mask = mask,
-            .interface = std.Io.Writer{
-                .buffer = buffer,
-                .vtable = &std.Io.Writer.VTable{ .drain = drain, .flush = flush },
-            },
+            .mask_strategy = mask_strategy,
+            .state = .{ .waiting_for_begin_header_fragment = .{ .is_first = true } },
         };
     }
 
-    fn drain(writer: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+    pub fn beginPayloadFragment(self: *FragmentedMessageWriter, len: usize, final: bool) std.Io.Writer.Error!void {
+        try self.interface.flush();
+        std.debug.assert(self.state == .waiting_for_begin_header_fragment);
+
+        const is_first = self.state.waiting_for_begin_header_fragment.is_first;
+        const opcode = if (is_first) self.opcode else .continuation;
+        const header: ws.message.frame.AnyFrameHeader = .init(final, opcode, len, self.mask_strategy);
+        self.state = .{ .writing_header = header };
+    }
+
+    fn drainFn(writer: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
         const self: *FragmentedMessageWriter = @alignCast(@fieldParentPtr("interface", writer));
+        return drain(self, data, splat) catch |err| {
+            self.state = .{ .err = err };
+            return error.WriteFailed;
+        };
+    }
 
-        // if there is no data to drain, do not write anything
-        const payload_len = writer.buffered().len + std.Io.Writer.countSplat(data, splat);
-        if (payload_len == 0) {
-            return 0;
-        }
-
-        const frame_header = ws.message.frame.AnyFrameHeader.init(false, self.opcode, payload_len, self.mask);
-        try frame_header.writeTo(self.underlying_writer);
-
-        // make sure that all future frames are continuation frames
-        self.opcode = .continuation;
-
-        return try self.writePayloadFragment(data, splat, frame_header);
+    fn drain(self: *FragmentedMessageWriter, data: []const []const u8, splat: usize) Error!usize {
+        return switch (self.state) {
+            .waiting_for_begin_header_fragment => 0,
+            .writing_header => try self.writeHeader(),
+            .writing_payload => try self.writePayload(data, splat),
+            .complete => if (self.interface.buffered().len + std.Io.Writer.countSplat(data, splat) > 0)
+                error.EndOfFrame
+            else
+                0,
+            .err => |err| return err,
+        };
     }
 
     fn flush(writer: *std.Io.Writer) std.Io.Writer.Error!void {
         const self: *FragmentedMessageWriter = @alignCast(@fieldParentPtr("interface", writer));
+
+        switch (self.state) {
+            .writing_header => {
+                _ = self.writeHeader() catch |err| {
+                    self.state = .{ .err = err };
+                    return error.WriteFailed;
+                };
+            },
+            else => {},
+        }
+
         try self.interface.defaultFlush();
-        try self.underlying_writer.flush();
+        self.underlying_writer.flush() catch {
+            self.state = .{ .err = error.UnderlyingWriteFailed };
+            return error.WriteFailed;
+        };
     }
 
-    fn writePayloadFragment(self: *FragmentedMessageWriter, data: []const []const u8, splat: usize, frame_header: ws.message.frame.AnyFrameHeader) std.Io.Writer.Error!usize {
-        const payload_len = frame_header.getPayloadLen() catch unreachable; // was created via usize, so cannot exceed usize
+    fn writeHeader(self: *FragmentedMessageWriter) Error!usize {
+        std.debug.assert(self.state == .writing_header);
+        const header = self.state.writing_header;
 
-        // simple drain if no mask
-        if (!frame_header.asMostBasicHeader().mask) {
-            try self.underlying_writer.writeAll(self.interface.buffered());
-            defer self.interface.end = 0;
-            for (data[0 .. data.len - 1]) |datum| {
-                try self.underlying_writer.writeAll(datum);
-            }
-            for (0..splat) |_| {
-                try self.underlying_writer.writeAll(data[data.len - 1]);
-            }
-            return payload_len - self.interface.buffered().len;
+        header.writeTo(self.underlying_writer) catch return error.UnderlyingWriteFailed;
+        self.state = .{ .writing_payload = .{ .header = header, .written = 0 } };
+
+        return 0;
+    }
+
+    fn writePayload(self: *FragmentedMessageWriter, data: []const []const u8, splat: usize) Error!usize {
+        std.debug.assert(self.state == .writing_payload);
+
+        const payload_len = try self.state.writing_payload.header.getPayloadLen();
+        if (self.state.writing_payload.written == payload_len) {
+            return error.EndOfFrame;
         }
 
-        const masking_key = frame_header.getMaskingKey() orelse std.debug.panic("invalid state: mask bit is set but header does not have a masking key", .{});
+        const written = try payloadDrain(&self.interface, self.underlying_writer, payload_len, self.state.writing_payload.written, self.state.writing_payload.header.getMaskingKey(), data, splat);
+        const consued_from_data = self.interface.consume(written);
+        self.state.writing_payload.written += written;
 
-        ws.message.mask_unmask(0, masking_key, self.interface.buffered());
-        try self.underlying_writer.writeAll(self.interface.buffered());
-        defer self.interface.end = 0;
-        var payload_idx: usize = self.interface.buffered().len;
-
-        for (data[0 .. data.len - 1]) |datum| {
-            var buf: [8000]u8 = undefined;
-            var datum_idx: usize = 0;
-            while (datum_idx < datum.len) : (datum_idx += 8000) {
-                const src_slice = datum[datum_idx..@min(datum_idx + 8000, datum.len)];
-                const dest_slice = buf[0..src_slice.len];
-                @memcpy(dest_slice, src_slice);
-                ws.message.mask_unmask(payload_idx, masking_key, dest_slice);
-                try self.underlying_writer.writeAll(dest_slice);
-                payload_idx += 8000;
-            }
-        }
-        for (0..splat) |_| {
-            const pattern = data[data.len - 1];
-            var buf: [8000]u8 = undefined;
-            var pattern_idx: usize = 0;
-            while (pattern_idx < pattern.len) : (pattern_idx += 8000) {
-                const src_slice = pattern[pattern_idx..@min(pattern_idx + 8000, pattern.len)];
-                const dest_slice = buf[0..src_slice.len];
-                @memcpy(dest_slice, src_slice);
-                ws.message.mask_unmask(payload_idx, masking_key, dest_slice);
-                try self.underlying_writer.writeAll(dest_slice);
-                payload_idx += 8000;
+        if (self.state.writing_payload.written == payload_len) {
+            if (self.state.writing_payload.header.asMostBasicHeader().fin) {
+                self.state = .complete;
+            } else {
+                self.state = .{ .waiting_for_begin_header_fragment = .{ .is_first = false } };
             }
         }
 
-        return payload_len - self.interface.buffered().len;
+        return consued_from_data;
     }
 
-    pub fn closeWithWrite(self: *FragmentedMessageWriter, bytes: []const u8) !void {
-        const payload_len = self.interface.buffered().len + bytes.len;
-        const frame_header = ws.message.frame.AnyFrameHeader.init(true, self.opcode, payload_len, self.mask);
-        try frame_header.writeTo(self.underlying_writer);
-        _ = try self.writePayloadFragment(&.{bytes}, 1, frame_header);
-        try self.interface.flush();
-    }
-
-    pub fn close(self: *FragmentedMessageWriter) !void {
-        try closeWithWrite(self, &.{});
-    }
+    pub const State = union(enum) {
+        waiting_for_begin_header_fragment: struct { is_first: bool },
+        writing_header: ws.message.frame.AnyFrameHeader,
+        writing_payload: struct { header: ws.message.frame.AnyFrameHeader, written: u64 },
+        complete: void,
+        err: Error,
+    };
 };
+
+fn payloadDrain(
+    self_interface: *std.Io.Writer,
+    underlying_writer: *std.Io.Writer,
+    payload_len: usize,
+    payload_written: usize,
+    masking_key: ?[4]u8,
+    data: []const []const u8,
+    splat: usize,
+) Error!usize {
+    const payload_remaining_bytes = payload_len - payload_written;
+
+    if (payload_remaining_bytes == 0) {
+        const bytes_trying_to_write = self_interface.end + std.Io.Writer.countSplat(data, splat);
+        if (bytes_trying_to_write > 0) {
+            return error.EndOfFrame;
+        }
+    }
+
+    // TODO - writeSplatHeaderLimit does not work well with fixed writer
+
+    // do simple write if no mask
+    if (masking_key == null) {
+        return myWriteSplatHeaderLimit(underlying_writer, self_interface.buffered(), data, splat, .limited(payload_remaining_bytes)) catch return error.UnderlyingWriteFailed;
+    }
+
+    // mask while writing
+    var masked_buf: [8000]u8 = undefined;
+    const max_bytes = @min(payload_remaining_bytes, masked_buf.len);
+    var buf_writer = std.Io.Writer.fixed(&masked_buf);
+
+    _ = myWriteSplatHeaderLimit(&buf_writer, self_interface.buffered(), data, splat, .limited(max_bytes)) catch unreachable;
+    ws.message.mask_unmask(payload_written, masking_key.?, buf_writer.buffered());
+    return underlying_writer.write(buf_writer.buffered()) catch return error.UnderlyingWriteFailed;
+}
+
+fn myWriteSplatHeaderLimit(w: *std.Io.Writer, header: []const u8, data: []const []const u8, splat: usize, limit: std.Io.Limit) std.Io.Writer.Error!usize {
+    if (header.len > 0) {
+        return try w.write(limit.sliceConst(header));
+    }
+    if (data.len > 0) {
+        if (data.len > 1 and data[0].len > 0) {
+            return try w.write(limit.sliceConst(data[0]));
+        }
+        if (data.len == 1) {
+            var written: usize = 0;
+            for (0..splat) |_| {
+                const reduced_limit = limit.subtract(written) orelse break;
+                const n = try w.write(reduced_limit.sliceConst(data[0]));
+                written += n;
+                if (n != data[0].len) {
+                    break;
+                }
+            }
+
+            return written;
+        }
+    }
+    return 0;
+}
 
 // these tests come from the spec
 
 test "A single-frame unmasked text message" {
     const message_payload = "Hello";
-    var output_writer = std.Io.Writer.Allocating.init(std.testing.allocator);
+    var output_writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer output_writer.deinit();
     var message_writer_buf: [100]u8 = undefined;
-    var message_writer = try UnfragmentedPayloadWriter.init(&output_writer.writer, message_payload.len, .text, .unmasked, &message_writer_buf);
+    var message_writer: UnfragmentedMessageWriter = .init(&output_writer.writer, message_payload.len, .text, .unmasked, &message_writer_buf);
     try message_writer.interface.writeAll(message_payload);
     try message_writer.interface.flush();
 
@@ -240,10 +305,10 @@ test "A single-frame unmasked text message" {
 
 test "A single-frame masked text message" {
     const message_payload = "Hello";
-    var output_writer = std.Io.Writer.Allocating.init(std.testing.allocator);
+    var output_writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer output_writer.deinit();
     var message_writer_buf: [100]u8 = undefined;
-    var message_writer = try UnfragmentedPayloadWriter.init(&output_writer.writer, message_payload.len, .text, .{ .fixed = 0x37fa213d }, &message_writer_buf);
+    var message_writer: UnfragmentedMessageWriter = .init(&output_writer.writer, message_payload.len, .text, .{ .fixed = 0x37fa213d }, &message_writer_buf);
     try message_writer.interface.writeAll(message_payload);
     try message_writer.interface.flush();
 
@@ -252,35 +317,43 @@ test "A single-frame masked text message" {
 }
 
 test "A fragmented unmasked text message" {
-    var output_writer = std.Io.Writer.Allocating.init(std.testing.allocator);
+    var output_writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer output_writer.deinit();
     var buf: [100]u8 = undefined;
-    var message_writer = FragmentedMessageWriter.init(&output_writer.writer, .text, .unmasked, &buf);
-    _ = try message_writer.interface.writeAll("Hel");
+    var message_writer: FragmentedMessageWriter = .init(&output_writer.writer, .text, .unmasked, &buf);
+
+    try message_writer.beginPayloadFragment(3, false);
+    try message_writer.interface.writeAll("Hel");
+
+    try message_writer.beginPayloadFragment(2, true);
+    try message_writer.interface.writeAll("lo");
+
     try message_writer.interface.flush();
-    _ = try message_writer.closeWithWrite("lo");
 
     const expected = [_]u8{ 0x01, 0x03, 0x48, 0x65, 0x6c, 0x80, 0x02, 0x6c, 0x6f };
     try std.testing.expectEqualSlices(u8, &expected, output_writer.written());
 }
 
 test "(not in spec) A fragmented unmasked text message interrupted with a masked control frame" {
-    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer output.deinit();
     var buf: [100]u8 = undefined;
-    var message_writer = FragmentedMessageWriter.init(&output.writer, .text, .unmasked, &buf);
+    var message_writer: FragmentedMessageWriter = .init(&output.writer, .text, .unmasked, &buf);
 
-    _ = try message_writer.interface.writeAll("Hel");
+    try message_writer.beginPayloadFragment(3, false);
+    try message_writer.interface.writeAll("Hel");
     try message_writer.interface.flush();
 
     // simulate pong response in the middle of fragmented payload
     const pong_payload = "Hello";
     var pong_buf: [100]u8 = undefined;
-    var pong = try UnfragmentedPayloadWriter.initControl(&output.writer, pong_payload.len, .pong, .{ .fixed = 0x37fa213d }, &pong_buf);
+    var pong: UnfragmentedMessageWriter = .initControl(&output.writer, pong_payload.len, .pong, .{ .fixed = 0x37fa213d }, &pong_buf);
     try pong.interface.writeAll(pong_payload);
     try pong.interface.flush();
 
-    _ = try message_writer.closeWithWrite("lo");
+    try message_writer.beginPayloadFragment(2, true);
+    try message_writer.interface.writeAll("lo");
+    try message_writer.interface.flush();
 
     const expected = [_]u8{
         // first fragment: "Hel"
@@ -295,13 +368,14 @@ test "(not in spec) A fragmented unmasked text message interrupted with a masked
     try std.testing.expectEqualSlices(u8, &expected, output.written());
 }
 
-test "example that messed me up" {
-    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+test "(not in spec) example that messed me up" {
+    var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer output.deinit();
+
     const close_reason = "invalid frame header";
     var buf: [100]u8 = undefined;
-    var message_writer = try UnfragmentedPayloadWriter.initControl(&output.writer, close_reason.len + 2, .close, .{ .fixed = 0xd585b161 }, &buf);
-    try message_writer.interface.writeInt(u16, @intFromEnum(ws.Connection.CloseStatus.protocol_error), .big);
+    var message_writer: UnfragmentedMessageWriter = .initControl(&output.writer, close_reason.len + 2, .close, .{ .fixed = 0xd585b161 }, &buf);
+    try message_writer.interface.writeInt(u16, @intFromEnum(ws.message.ControlFrameHandler.CloseStatus.protocol_error), .big);
     try message_writer.interface.writeAll(close_reason);
     try message_writer.interface.flush();
 

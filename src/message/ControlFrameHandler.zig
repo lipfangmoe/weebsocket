@@ -19,7 +19,7 @@ pub fn default(mask_strategy: ws.message.frame.MaskStrategy, conn_writer: *std.I
     };
 }
 
-pub const Error = error{ ReceivedCloseFrame, WriteFailed, EndOfStream } || ws.message.writer2.Error;
+pub const Error = error{ ReceivedCloseFrame, InvalidMessage, WriteFailed, EndOfStream } || ws.message.writer.Error;
 
 fn defaultControlFrameHandler(
     self: *const ControlFrameHandler,
@@ -31,7 +31,7 @@ fn defaultControlFrameHandler(
 
     switch (opcode) {
         .ping => {
-            var buf: [1000]u8 = undefined;
+            var buf: [300]u8 = undefined;
             var control_message_writer: ws.SingleFrameMessageWriter = .initControl(self.conn_writer, header.payload_len, .pong, self.mask_strategy, &buf);
             control_message_writer.interface.writeAll(payload) catch {
                 std.debug.assert(control_message_writer.state == .err);
@@ -48,9 +48,65 @@ fn defaultControlFrameHandler(
         },
         .pong => {},
         .close => {
-            ws.log.debug("peer sent close frame with payload '{s}'", .{payload});
+            if (payload.len == 1) {
+                return error.InvalidMessage;
+            }
+            if (payload.len > 2 and !std.unicode.utf8ValidateSlice(payload[2..])) {
+                return error.InvalidMessage;
+            }
+            if (payload.len >= 2) {
+                const status: CloseStatus = @enumFromInt(std.mem.readInt(u16, payload[0..2], .big));
+                if (!status.isSendable()) {
+                    return error.InvalidMessage;
+                }
+            }
             return error.ReceivedCloseFrame;
         },
         else => unreachable,
     }
 }
+
+pub const CloseStatus = enum(u16) {
+    normal = 1000,
+    going_away = 1001,
+    protocol_error = 1002,
+    cannot_accept = 1003,
+    inconsistent_format = 1007,
+    policy_violation = 1008,
+    message_too_large = 1009,
+    expected_extension = 1010,
+    unexpected_condition = 1011,
+
+    // not sendable over the wire
+    no_status_code_present = 1005,
+    closed_abnormally = 1006,
+    invalid_tls_signature = 1015,
+    _,
+
+    pub fn isSendable(self: CloseStatus) bool {
+        return switch (self) {
+            .no_status_code_present,
+            .closed_abnormally,
+            .invalid_tls_signature,
+            => false,
+
+            .normal,
+            .going_away,
+            .protocol_error,
+            .cannot_accept,
+            .inconsistent_format,
+            .policy_violation,
+            .message_too_large,
+            .expected_extension,
+            .unexpected_condition,
+            => true,
+
+            else => switch (@intFromEnum(self)) {
+                0...999 => false,
+                1000...2999 => false,
+                3000...4999 => true,
+                else => false,
+            },
+        };
+    }
+};
