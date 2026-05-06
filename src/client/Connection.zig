@@ -2,7 +2,7 @@ const std = @import("std");
 const ws = @import("../root.zig");
 const frame = ws.message.frame;
 
-rng: std.Random,
+rng: std.Random.IoSource,
 http_request: std.http.Client.Request,
 amt_read_from_request: usize = 0,
 peer_closing: bool = false,
@@ -10,7 +10,7 @@ self_closing: bool = false,
 
 const Connection = @This();
 
-pub fn init(http_request: std.http.Client.Request, rng: std.Random) Connection {
+pub fn init(http_request: std.http.Client.Request, rng: std.Random.IoSource) Connection {
     return .{
         .rng = rng,
         .http_request = http_request,
@@ -24,7 +24,7 @@ pub fn deinitAndFlush(self: *Connection, payload: ?ClosePayload) bool {
             std.debug.panic("ClosePayload reason may not be longer than 123 bytes. (len={})", .{payload_nn.reason.len});
         }
         var buf: [200]u8 = undefined;
-        var message_writer: ws.SingleFrameMessageWriter = .initControl(self.writer(), payload_nn.reason.len + 2, .close, .{ .rng = self.rng }, &buf);
+        var message_writer: ws.SingleFrameMessageWriter = .initControl(self.writer(), payload_nn.reason.len + 2, .close, .{ .rng = self.rng.interface() }, &buf);
         if (!payload_nn.status.isSendable()) {
             std.debug.panic("cannot send status {} over the wire", .{payload_nn.status});
         }
@@ -48,7 +48,7 @@ pub fn deinitAndFlush(self: *Connection, payload: ?ClosePayload) bool {
         };
     } else {
         var buf: [50]u8 = undefined;
-        var control_message_writer: ws.SingleFrameMessageWriter = .initControl(self.writer(), 2, .close, .{ .rng = self.rng }, &buf);
+        var control_message_writer: ws.SingleFrameMessageWriter = .initControl(self.writer(), 2, .close, .{ .rng = self.rng.interface() }, &buf);
         control_message_writer.interface.writeInt(u16, @intFromEnum(ws.message.ControlFrameHandler.CloseStatus.normal), .big) catch {
             std.debug.assert(control_message_writer.state == .err);
 
@@ -143,7 +143,7 @@ pub const SendMessageError = error{
 
 /// Waits to receive a message, returns a reader for the payload
 pub fn receiveMessage(self: *Connection, buf: []u8) ws.MessageReader {
-    return .init(self.reader(), .default(.{ .rng = self.rng }, self.writer()), buf);
+    return .init(self.reader(), .default(.{ .rng = self.rng.interface() }, self.writer()), buf);
 }
 
 /// Waits to receive a message, returns the payload content
@@ -187,7 +187,7 @@ pub fn initMessageWriter(self: *Connection, msg_type: ws.message.Type, buf: []u8
     if (self.self_closing) {
         std.debug.panic("Trying to write message after closing self", .{});
     }
-    return .init(self.writer(), message_length, msg_type, .{ .rng = self.rng }, buf);
+    return .init(self.writer(), message_length, msg_type, .{ .rng = self.rng.interface() }, buf);
 }
 
 /// Creates a MessageWriter, which writes a Websocket Frame Header, and then
@@ -200,7 +200,7 @@ pub fn createMessageStreamUnknownLength(self: *Connection, msg_type: ws.message.
     if (self.self_closing) {
         std.debug.panic("Trying to write message after closing self", .{});
     }
-    return .init(self.writer(), msg_type, .{ .rng = self.rng }, buf);
+    return .init(self.writer(), msg_type, .{ .rng = self.rng.interface() }, buf);
 }
 
 fn reader(self: *Connection) *std.Io.Reader {
