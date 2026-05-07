@@ -77,11 +77,7 @@ test "tokyo calling - aratashi gakko (valid utf8)" {
 }
 
 test "autobahn 6.2.3" {
-    if (true) {
-        // see https://github.com/crossbario/autobahn-testsuite/issues/145
-        return error.SkipZigTest;
-    }
-    const str = "Hello-\xb5@\xdf\xf6\xe4\xfc\xe0\xe1-UTF-8!!";
+    const str = "Hello-\xc2\xb5@\xc3\x9f\xc3\xb6\xc3\xa4\xc3\xbc\xc3\xa0\xc3\xa1-UTF-8!!";
 
     for (0..str.len) |split| {
         const str1 = str[0..split];
