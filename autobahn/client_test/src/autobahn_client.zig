@@ -28,8 +28,6 @@ fn logFn(
 }
 
 pub fn main(init: std.process.Init) !void {
-    try init.io.sleep(.fromSeconds(5), .awake);
-
     defer updateReport(init.io, init.gpa) catch unreachable;
 
     const specific_cases: ?[]const []const u8 = null; // can set to a specific test with &.{"1.1.6"}
