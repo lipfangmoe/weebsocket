@@ -1,30 +1,44 @@
 const std = @import("std");
 
 pub const AnyFrameHeader = union(enum) {
-    u16_unmasked: FrameHeader(.u16, false),
-    u32_unmasked: FrameHeader(.u32, false),
-    u80_unmasked: FrameHeader(.u80, false),
-    u16_masked: FrameHeader(.u16, true),
-    u32_masked: FrameHeader(.u32, true),
-    u80_masked: FrameHeader(.u80, true),
+    unmasked_short: UnmaskedShortHeader,
+    unmasked_medium: UnmaskedMediumHeader,
+    unmasked_long: UnmaskedLongHeader,
+    masked_short: MaskedShortHeader,
+    masked_medium: MaskedMediumHeader,
+    masked_long: MaskedLongHeader,
 
-    pub fn init(final: bool, opcode: Opcode, payload_len: u64, mask: MaskStrategy) AnyFrameHeader {
-        if (payload_len <= 125) {
-            return if (mask.getMask() != null)
-                .{ .u16_masked = FrameHeader(.u16, true).init(final, opcode, @intCast(payload_len), mask) }
-            else
-                .{ .u16_unmasked = FrameHeader(.u16, false).init(final, opcode, @intCast(payload_len), mask) };
-        }
-        if (payload_len <= std.math.maxInt(u16)) {
-            return if (mask.getMask() != null)
-                .{ .u32_masked = FrameHeader(.u32, true).init(final, opcode, @intCast(payload_len), mask) }
-            else
-                .{ .u32_unmasked = FrameHeader(.u32, false).init(final, opcode, @intCast(payload_len), mask) };
-        }
-        return if (mask.getMask() != null)
-            .{ .u80_masked = FrameHeader(.u80, true).init(final, opcode, @intCast(payload_len), mask) }
-        else
-            .{ .u80_unmasked = FrameHeader(.u80, false).init(final, opcode, @intCast(payload_len), mask) };
+    pub fn init(final: bool, opcode: Opcode, payload_len: u64, mask_strategy: MaskStrategy) AnyFrameHeader {
+        const common_payload_len: u7 = switch (payload_len) {
+            0...125 => @intCast(payload_len),
+            126...std.math.maxInt(u16) => 126,
+            else => 127,
+        };
+
+        const common: CommonHeader = .{
+            .payload_len = common_payload_len,
+            .mask = mask_strategy != .unmasked,
+            .opcode = opcode,
+            .rsv3 = false,
+            .rsv2 = false,
+            .rsv1 = false,
+            .fin = final,
+        };
+
+        // zig fmt: off
+        return 
+            if (mask_strategy.getMask()) |masking_key|
+                switch (payload_len) {
+                    0...125 => .{ .masked_short = .{ .common = common, .masking_key = masking_key } },
+                    126...std.math.maxInt(u16) => .{ .masked_medium = .{ .common = common, .masking_key = masking_key, .extended_payload_len = @intCast(payload_len) } },
+                    else => .{ .masked_long = .{ .common = common, .masking_key = masking_key, .extended_payload_len = payload_len } },
+                }
+            else switch (payload_len) {
+                0...125 => .{ .unmasked_short = .{ .common = common } },
+                126...std.math.maxInt(u16) => .{ .unmasked_medium = .{ .common = common, .extended_payload_len = @intCast(payload_len) } },
+                else => .{ .unmasked_long = .{ .common = common, .extended_payload_len = payload_len } },
+            };
+        // zig fmt: on
     }
 
     pub fn readFrom(reader: *std.Io.Reader) error{ ReadFailed, EndOfStream }!AnyFrameHeader {
@@ -151,8 +165,8 @@ pub const AnyFrameHeader = union(enum) {
     pub fn asMostBasicHeader(self: AnyFrameHeader) FrameHeader(.u16, false) {
         return switch (self) {
             inline else => |impl| FrameHeader(.u16, false){
-                .masking_key = void{},
-                .extended_payload_len = void{},
+                .masking_key = {},
+                .extended_payload_len = {},
                 .payload_len = impl.payload_len,
                 .mask = impl.mask,
                 .opcode = impl.opcode,
@@ -171,77 +185,47 @@ pub const AnyFrameHeader = union(enum) {
     }
 };
 
-pub fn FrameHeader(comptime size: FrameHeaderSize, comptime has_masking_key: bool) type {
-    const PayloadLenArgT = switch (size) {
-        .u16 => u7,
-        .u32 => u16,
-        .u80 => u64,
-    };
-    return packed struct {
-        /// The XOR mask to put on the payload
-        masking_key: if (has_masking_key) u32 else void,
-        /// If payload_len is set to 126 (for u32) or 127 (for u80), this is the true payload length.
-        extended_payload_len: switch (size) {
-            .u16 => void,
-            .u32 => u16,
-            .u80 => u64,
-        },
-        /// The length of the payload of the frame. If set to 126 (for u32) or 127 (for u80), extended_payload_len is the true payload length.
-        payload_len: u7,
-        /// Defines whether or not a mask should be included
-        mask: bool,
-        /// Defines the interpretation of the payload data
-        opcode: Opcode,
-        /// MUST be 0
-        rsv3: bool,
-        /// MUST be 0
-        rsv2: bool,
-        /// MUST be 0
-        rsv1: bool,
-        /// whether this is the final fragment in a message
-        fin: bool,
-
-        const Self = @This();
-
-        pub fn init(final: bool, opcode: Opcode, payload_len: PayloadLenArgT, mask: MaskStrategy) Self {
-            const masking_key = if (has_masking_key)
-                mask.getMask() orelse std.debug.panic("header type {} does not allow for masking key, but mask type {s} was provided", .{ @TypeOf(Self), @tagName(mask) })
-            else
-                void{};
-            const payload_len_field = switch (size) {
-                .u16 => payload_len,
-                .u32 => 126,
-                .u80 => 127,
-            };
-            const extended_payload_len_field = switch (size) {
-                .u16 => void{},
-                inline else => payload_len,
-            };
-            return Self{
-                .fin = final,
-                .rsv1 = false,
-                .rsv2 = false,
-                .rsv3 = false,
-                .opcode = opcode,
-                .mask = has_masking_key,
-                .payload_len = payload_len_field,
-                .extended_payload_len = extended_payload_len_field,
-                .masking_key = masking_key,
-            };
-        }
-
-        pub fn getPayloadLen(self: Self) u64 {
-            return switch (size) {
-                .u16 => self.payload_len,
-                inline else => self.extended_payload_len,
-            };
-        }
-
-        pub fn format(self: @This(), out: *std.Io.Writer) !void {
-            try out.print("FrameHeader(fin={},op={},mask={},payload_len={},extended_payload_len={},masking_key={})", .{ self.fin, self.opcode, self.mask, self.payload_len, self.extended_payload_len, self.masking_key });
-        }
-    };
-}
+pub const CommonHeader = packed struct(u16) {
+    /// The length of the payload of the frame. If set to 126 (for u32) or 127 (for u80), extended_payload_len is the true payload length.
+    payload_len: u7,
+    /// Defines whether or not a mask should be included
+    mask: bool,
+    /// Defines the interpretation of the payload data
+    opcode: Opcode,
+    /// MUST be 0
+    rsv3: bool,
+    /// MUST be 0
+    rsv2: bool,
+    /// MUST be 0
+    rsv1: bool,
+    /// whether this is the final fragment in a message
+    fin: bool,
+};
+pub const UnmaskedShortHeader = packed struct(u16) {
+    common: CommonHeader,
+};
+pub const UnmaskedMediumHeader = packed struct(u32) {
+    extended_payload_len: u16,
+    common: CommonHeader,
+};
+pub const UnmaskedLongHeader = packed struct(u64) {
+    extended_payload_len: u64,
+    common: CommonHeader,
+};
+pub const MaskedShortHeader = packed struct(u64) {
+    masking_key: u32,
+    common: CommonHeader,
+};
+pub const MaskedMediumHeader = packed struct(u96) {
+    masking_key: u32,
+    extended_payload_len: u16,
+    common: CommonHeader,
+};
+pub const MaskedLongHeader = packed struct(u128) {
+    masking_key: u32,
+    extended_payload_len: u64,
+    common: CommonHeader,
+};
 
 pub const Opcode = enum(u4) {
     // data frames
