@@ -14,7 +14,7 @@ Zig Websocket Client (maybe Server one day). Does not implement any WebSocket ex
 To add this to your project, use the Zig Package Manager:
 
 ```bash
-# you can get a specific version by putting it after the #, ie `#v0.4.0`
+# you can get a specific version by putting it after the #, ie `#v0.5.0`
 zig fetch --save 'git+https://codeberg.org/lipfang/weebsocket#main'
 ```
 
@@ -25,7 +25,7 @@ const std = @import("std");
 const ws = @import("weebsocket");
 
 pub fn main(init: std.process.Init) !void {
-    var client = ws.Client.init(init.io, init.gpa);
+    var client: ws.Client = .init(init.io, init.gpa);
     defer client.deinit();
 
     const uri = std.Uri.parse("wss://example.com/") catch unreachable;
@@ -34,8 +34,8 @@ pub fn main(init: std.process.Init) !void {
 
     while (true) {
         var reader_buf: [1000]u8 = undefined;
-        var message = try connection.receiveMessage(&reader_buf);
-        const payload_reader = message.reader();
+        var message = connection.receiveMessage(&reader_buf);
+        var payload_reader = &message.interface;
         const payload = try payload_reader.allocRemaining(init.gpa, .limited(10_000_000));
         defer init.gpa.free(payload);
 
