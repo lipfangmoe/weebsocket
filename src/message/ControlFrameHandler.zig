@@ -7,7 +7,7 @@ mask_strategy: ws.message.frame.MaskStrategy,
 conn_writer: *std.Io.Writer,
 handlerFn: *const fn (
     self: *const ControlFrameHandler,
-    header: ws.message.frame.FrameHeader(.u16, false),
+    header: ws.message.frame.UnmaskedShortHeader,
     payload: []const u8,
 ) Error!void,
 
@@ -23,16 +23,16 @@ pub const Error = error{ ReceivedCloseFrame, InvalidMessage, WriteFailed, EndOfS
 
 fn defaultControlFrameHandler(
     self: *const ControlFrameHandler,
-    header: ws.message.frame.FrameHeader(.u16, false),
+    header: ws.message.frame.UnmaskedShortHeader,
     payload: []const u8,
 ) Error!void {
-    const opcode: ws.message.frame.Opcode = header.opcode;
+    const opcode: ws.message.frame.Opcode = header.common.opcode;
     std.debug.assert(opcode.isControlFrame());
 
     switch (opcode) {
         .ping => {
             var buf: [300]u8 = undefined;
-            var control_message_writer: ws.SingleFrameMessageWriter = .initControl(self.conn_writer, header.payload_len, .pong, self.mask_strategy, &buf);
+            var control_message_writer: ws.SingleFrameMessageWriter = .initControl(self.conn_writer, header.common.payload_len, .pong, self.mask_strategy, &buf);
             control_message_writer.interface.writeAll(payload) catch {
                 std.debug.assert(control_message_writer.state == .err);
 
