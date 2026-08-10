@@ -4,7 +4,6 @@ const frame = ws.message.frame;
 
 rng: std.Random.IoSource,
 http_request: std.http.Client.Request,
-amt_read_from_request: usize = 0,
 peer_closing: bool = false,
 self_closing: bool = false,
 
