@@ -8,7 +8,7 @@ pub fn main(init: std.process.Init) !void {
 
     defer updateReport(init.io, init.gpa) catch unreachable;
 
-    const specific_cases: ?[]const []const u8 = null; // can set to a specific test with &.{"1.1.6"}
+    const specific_cases: ?[]const []const u8 = &.{"1.1.6"}; // can set to a specific test with &.{"1.1.6"}
 
     for (specific_cases orelse &all_cases) |case| {
         std.log.info("====== running case: {s} ======", .{case});
@@ -26,7 +26,7 @@ pub fn main(init: std.process.Init) !void {
         defer connection.deinit(null);
 
         while (true) {
-            echo(&connection) catch |err| {
+            echo(init.gpa, &connection) catch |err| {
                 switch (err) {
                     error.Expected => break,
                     error.Unexpected => return err,
@@ -38,29 +38,29 @@ pub fn main(init: std.process.Init) !void {
 }
 
 const EchoError = error{ Expected, Unexpected };
-fn echo(connection: *ws.Connection) !void {
-    var message = connection.receiveMessage() catch |err| return switch (err) {
-        error.Unknown => error.Unexpected,
+fn echo(allocator: std.mem.Allocator, connection: *ws.Connection) !void {
+    var message = connection.receiveMessage();
+    const header = message.getHeader() catch |err| return switch (err) {
+        error.UnderlyingReadFailed, error.UnderlyingWriteFailed, error.UnderlyingControlFrameWriteFailed => error.Unexpected,
         else => {
             std.log.info("error reading message header: {}", .{err});
             return error.Expected;
         },
     };
 
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
-
-    const max_payload_len = message.reader_impl.?.payloadLen() orelse 100_000_000;
-    const payload = message.reader().readAlloc(arena.allocator(), max_payload_len) catch |err| return switch (message.stream_error.?) {
-        error.UnexpectedReadFailure, error.UnexpectedControlFrameResponseFailure => error.Unexpected,
+    const payload_max_len = header.getPayloadLen() catch return error.Expected;
+    const payload = message.interface.readAlloc(allocator, payload_max_len) catch |err| return switch (message.state.err) {
+        error.UnderlyingReadFailed, error.UnderlyingWriteFailed, error.UnderlyingControlFrameWriteFailed => error.Unexpected,
         else => {
             std.log.info("error writing message header: {}", .{err});
             return error.Expected;
         },
     };
+    defer allocator.free(payload);
 
-    connection.sendMessage(message.reader_impl.?.getMessageType(), payload) catch |err| return switch (err) {
-        error.WriteFailed => error.Unexpected,
+    const message_type: ws.message.Type = ws.message.Type.fromOpcode(header.asMostBasicHeader().opcode) catch return error.Unexpected;
+    connection.sendMessage(message_type, payload) catch |err| return switch (err) {
+        error.Overflow, error.EndOfStream, error.UnderlyingWriteFailed => error.Unexpected,
         else => {
             std.log.info("error writing message header: {}", .{err});
             return error.Expected;

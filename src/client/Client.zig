@@ -18,7 +18,7 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator) Client {
     return .{ .rng = rng, .http_client = http_client };
 }
 
-const HandshakeError = error{NotWebsocketServer} || std.Io.Writer.Error || std.http.Client.Request.ReceiveHeadError;
+const HandshakeError = error{ NotWebsocketServer, OutOfMemory, HttpRequestError } || std.Io.Cancelable;
 
 pub fn handshake(
     self: *Client,
@@ -37,16 +37,32 @@ pub fn handshake(
     if (extra_headers) |extra| {
         try headers.appendSliceBounded(extra);
     }
-    var req = try self.http_client.request(.GET, uri, .{
+    var req = self.http_client.request(.GET, uri, .{
         .headers = .{
             .connection = .{ .override = "Upgrade" },
         },
         .extra_headers = headers.items,
-    });
+    }) catch return error.HttpRequestError;
     errdefer req.deinit();
 
-    try req.sendBodiless();
-    const response = try req.receiveHead(&.{});
+    req.sendBodiless() catch |err| switch (err) {
+        error.WriteFailed => switch (req.connection.?.stream_writer.err.?) {
+            error.Canceled => return error.Canceled,
+            else => return error.HttpRequestError,
+        },
+    };
+
+    const response = req.receiveHead(&.{}) catch |err| switch (err) {
+        error.ReadFailed => switch (req.connection.?.getReadError().?) {
+            error.Canceled => return error.Canceled,
+            else => return error.HttpRequestError,
+        },
+        error.WriteFailed => switch (req.connection.?.stream_writer.err.?) {
+            error.Canceled => return error.Canceled,
+            else => return error.HttpRequestError,
+        },
+        else => return error.HttpRequestError,
+    };
 
     if (response.head.status != .switching_protocols) {
         ws.log.err("expected status 101 SWITCHING PROTOCOLS, got {d} {s}", .{ @intFromEnum(response.head.status), response.head.status.phrase() orelse "unknown" });

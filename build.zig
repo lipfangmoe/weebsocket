@@ -21,17 +21,9 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    const test_compile_step = b.addTest(.{
-        .root_module = ws_module,
-        .use_llvm = true,
-        .filters = test_filters,
-    });
+    const test_compile_step = b.addTest(.{ .root_module = ws_module, .filters = test_filters, .use_llvm = true });
 
-    const autobahn_client_compile_step = b.addExecutable(.{
-        .name = "weebsocket",
-        .root_module = autobahn_client_module,
-        .use_llvm = true,
-    });
+    const autobahn_client_compile_step = b.addExecutable(.{ .name = "weebsocket", .root_module = autobahn_client_module, .use_llvm = true });
 
     // zig build example
     //const example_step = b.step("example", "Build the example shown in the README");
@@ -57,7 +49,9 @@ pub fn build(b: *std.Build) void {
 
     // zig build check
     const check_step = b.step("check", "Run the compiler without building");
-    check_step.dependOn(&test_compile_step.step);
-    check_step.dependOn(&autobahn_client_compile_step.step);
-    //check_step.dependOn(example_step);
+
+    const test_compile_check_step = b.addTest(.{ .name = "check-test", .root_module = ws_module });
+    const autobahn_client_compile_check_step = b.addExecutable(.{ .name = "autobahn-check", .root_module = autobahn_client_module });
+    check_step.dependOn(&test_compile_check_step.step);
+    check_step.dependOn(&autobahn_client_compile_check_step.step);
 }

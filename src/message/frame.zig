@@ -163,6 +163,12 @@ pub const AnyFrameHeader = union(enum) {
             },
         };
     }
+
+    pub fn format(self: AnyFrameHeader, out: *std.Io.Writer) !void {
+        switch (self) {
+            inline else => |impl| try impl.format(out),
+        }
+    }
 };
 
 pub fn FrameHeader(comptime size: FrameHeaderSize, comptime has_masking_key: bool) type {
@@ -229,6 +235,10 @@ pub fn FrameHeader(comptime size: FrameHeaderSize, comptime has_masking_key: boo
                 .u16 => self.payload_len,
                 inline else => self.extended_payload_len,
             };
+        }
+
+        pub fn format(self: @This(), out: *std.Io.Writer) !void {
+            try out.print("FrameHeader(fin={},op={},mask={},payload_len={},extended_payload_len={},masking_key={})", .{ self.fin, self.opcode, self.mask, self.payload_len, self.extended_payload_len, self.masking_key });
         }
     };
 }

@@ -3,15 +3,15 @@ const ws = @import("./root.zig");
 
 pub const frame = @import("./message/frame.zig");
 pub const reader = @import("./message/reader.zig");
+pub const reader2 = @import("./message/reader2.zig");
 pub const writer = @import("./message/writer.zig");
+pub const writer2 = @import("./message/writer2.zig");
+pub const ControlFrameHandler = @import("./message/ControlFrameHandler.zig");
 
-pub const MessageReader = reader.MessageReader;
-pub const SingleFrameMessageReader = reader.UnfragmentedPayloadReader;
-pub const MultiFrameMessageReader = reader.FragmentedPayloadReader;
+pub const MessageReader = reader2.MessageReader;
 
-pub const MessageWriter = writer.MessageWriter;
-pub const SingleFrameMessageWriter = writer.UnfragmentedPayloadWriter;
-pub const MultiFrameMessageWriter = writer.FragmentedMessageWriter;
+pub const SingleFrameMessageWriter = writer2.UnfragmentedMessageWriter;
+pub const MultiFrameMessageWriter = writer2.FragmentedMessageWriter;
 
 pub const Type = enum {
     /// Indicates that the message is a valid UTF-8 string.
@@ -35,6 +35,7 @@ pub const Type = enum {
         };
     }
 };
+
 pub const ControlFrameHandlerError = error{ ReceivedCloseFrame, WriteFailed };
 pub const ControlFrameHeaderHandlerFn = *const ControlFrameHeaderHandlerFnBody;
 pub const ControlFrameHeaderHandlerFnBody = fn (
@@ -56,16 +57,13 @@ pub fn defaultControlFrameHandler(
     switch (opcode) {
         .ping => {
             var buf: [1000]u8 = undefined;
-            var control_message_writer = SingleFrameMessageWriter.initControl(conn_writer, header.payload_len, .pong, mask_strategy, &buf) catch |err| {
-                ws.log.err("Error while writing pong header: {}", .{err});
-                return error.WriteFailed;
-            };
+            var control_message_writer: SingleFrameMessageWriter = .initControl(conn_writer, header.payload_len, .pong, mask_strategy, &buf);
             control_message_writer.interface.writeAll(payload) catch |err| {
-                ws.log.err("Error while writing pong payload: {}", .{err});
+                ws.log.err("Error while writing pong: {}", .{err});
                 return error.WriteFailed;
             };
             control_message_writer.interface.flush() catch |err| {
-                ws.log.err("Error while writing pong payload: {}", .{err});
+                ws.log.err("Error while writing pong: {}", .{err});
                 return error.WriteFailed;
             };
         },
@@ -89,4 +87,5 @@ pub fn mask_unmask(payload_start: usize, masking_key: [4]u8, bytes: []u8) void {
 test {
     std.testing.refAllDecls(@This());
     _ = @import("./message/utf8_validator.zig");
+    _ = @import("./message/writer2.zig");
 }

@@ -14,22 +14,22 @@ pub fn main(init: std.process.Init) !void {
         const payload_reader = message.reader();
         const payload = try payload_reader.allocRemaining(init.gpa, .limited(10_000_000));
         defer init.gpa.free(payload);
-        if (std.mem.eql(u8, payload, "foobar")) {
-            // send a string
-            const str = "got your message!";
-            try connection.sendMessage(.text, str);
 
+        if (std.mem.eql(u8, payload, "foobar")) {
+
+            // example 1: send a string
+            try connection.sendMessage(.text, "got your message!");
+
+            // example 2: formatted data
             const Data = struct { int: u32, string: []const u8 };
             const data: Data = .{ .int = 5, .string = "some value" };
+            try connection.printMessage(.text, "{f}", .{std.json.fmt(data, .{})});
 
-            // low-level control over the buffer and payload writer
+            // example 3: low-level control
             var buf: [1000]u8 = undefined;
-            var payload_writer = connection.writeMessageStreamUnknownLength(.text, &buf);
+            var payload_writer = connection.createMessageStreamUnknownLength(.text, &buf);
             try std.json.Stringify.value(data, .{}, &payload_writer.interface);
             try payload_writer.interface.flush();
-
-            // a better way to do the above with `printMessage`
-            try connection.printMessage(.text, "{f}", .{std.json.fmt(data, .{})});
         }
     }
 }
