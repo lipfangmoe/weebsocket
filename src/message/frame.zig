@@ -128,7 +128,7 @@ pub const AnyFrameHeader = union(enum) {
         }
     }
 
-    pub fn getPayloadLen(self: AnyFrameHeader) !usize {
+    pub fn getPayloadLen(self: AnyFrameHeader) error{Overflow}!usize {
         return switch (self) {
             inline else => |impl| std.math.cast(usize, impl.getPayloadLen()) orelse return error.Overflow,
         };
@@ -234,7 +234,7 @@ pub fn FrameHeader(comptime size: FrameHeaderSize, comptime has_masking_key: boo
 }
 
 pub const Opcode = enum(u4) {
-    // non-control frames
+    // data frames
     continuation = 0x0,
     text = 0x1,
     binary = 0x2,
@@ -244,10 +244,21 @@ pub const Opcode = enum(u4) {
     ping = 0x9,
     pong = 0xA,
 
-    pub inline fn isControlFrame(self: Opcode) bool {
+    _,
+
+    pub fn isDataFrame(self: Opcode) bool {
+        return switch (self) {
+            .continuation, .text, .binary => true,
+            .close, .ping, .pong => false,
+            _ => false,
+        };
+    }
+
+    pub fn isControlFrame(self: Opcode) bool {
         return switch (self) {
             .continuation, .text, .binary => false,
             .close, .ping, .pong => true,
+            _ => false,
         };
     }
 };

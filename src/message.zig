@@ -14,14 +14,35 @@ pub const MultiFrameMessageWriter = writer.MultiFrameMessageWriter;
 pub const SingleFrameMessageReader = reader.UnfragmentedMessageReader;
 pub const MultiFrameMessageReader = reader.FragmentedMessageReader;
 
-pub const MessageType = writer.MessageType;
+pub const Type = enum {
+    /// Indicates that the message is a valid UTF-8 string.
+    text,
+    /// Indicates that the message is binary data with no guarantees about encoding.
+    binary,
 
+    pub fn toOpcode(self: Type) ws.message.frame.Opcode {
+        return switch (self) {
+            .text => .text,
+            .binary => .binary,
+        };
+    }
+
+    /// returns error.UnexpectedOpcode if called on a control frame header.
+    pub fn fromOpcode(opcode: ws.message.frame.Opcode) !Type {
+        return switch (opcode) {
+            .text => .text,
+            .binary => .binary,
+            else => error.UnexpectedOpcode,
+        };
+    }
+};
+pub const ControlFrameHandlerError = error{ ReceivedCloseFrame, UnexpectedWriteFailure, EndOfStream };
 pub const ControlFrameHeaderHandlerFn = *const ControlFrameHeaderHandlerFnBody;
 pub const ControlFrameHeaderHandlerFnBody = fn (
     conn_writer: std.io.AnyWriter,
     header: frame.FrameHeader(.u16, false),
     payload: std.BoundedArray(u8, 125),
-) anyerror!void;
+) ControlFrameHandlerError!void;
 
 pub const defaultControlFrameHandler: ControlFrameHeaderHandlerFnBody = controlFrameHandlerWithMask(.random_mask);
 
@@ -31,21 +52,33 @@ pub fn controlFrameHandlerWithMask(comptime mask: ws.message.frame.Mask) Control
             conn_writer: std.io.AnyWriter,
             frame_header: frame.FrameHeader(.u16, false),
             payload: std.BoundedArray(u8, 125),
-        ) anyerror!void {
+        ) ControlFrameHandlerError!void {
             const opcode: frame.Opcode = frame_header.opcode;
             std.debug.assert(opcode.isControlFrame());
 
             switch (opcode) {
                 .ping => {
-                    var received_payload = std.io.fixedBufferStream(payload.slice());
-                    var control_message_writer = ws.message.AnyMessageWriter.initControl(conn_writer, frame_header.payload_len, .pong, mask);
+                    std.log.debug("ping received, attempting to write pong", .{});
+                    var control_message_writer = ws.message.AnyMessageWriter.initControl(conn_writer, frame_header.payload_len, .pong, mask) catch |err| return switch (err) {
+                        error.EndOfStream => error.EndOfStream,
+                        else => {
+                            std.log.err("Error while writing pong header: {}", .{err});
+                            return error.UnexpectedWriteFailure;
+                        },
+                    };
                     const payload_writer = control_message_writer.payloadWriter();
-                    var fifo = std.fifo.LinearFifo(u8, .{ .Static = 1000 }).init();
-                    try fifo.pump(received_payload.reader(), payload_writer);
+                    payload_writer.writeAll(payload.constSlice()) catch |err| return switch (err) {
+                        error.EndOfStream => error.EndOfStream,
+                        else => {
+                            std.log.err("Error while writing pong payload: {}", .{err});
+                            return error.UnexpectedWriteFailure;
+                        },
+                    };
                 },
                 .pong => {},
                 .close => {
-                    return error.Closing;
+                    std.log.debug("peer sent close frame with payload '{s}'", .{payload.constSlice()});
+                    return error.ReceivedCloseFrame;
                 },
                 else => unreachable,
             }

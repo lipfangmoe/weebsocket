@@ -1,6 +1,13 @@
 # weebsocket (WIP, not functional)
 
-Zig Websocket Client (maybe Server one day)
+Zig Websocket Client (maybe Server one day). Does not implement any WebSocket extensions at the moment.
+
+## Features
+
+- Zero-alloc after initial handshake
+- API somewhat reminescent of `std.http`
+- Passes all autobahn tests (except compression)
+  - Compression one day...?
 
 ## Add to your Project
 
@@ -22,10 +29,11 @@ pub fn main() !void {
 	var client = ws.Client(gpa.allocator());
 	defer client.deinit();
 
-	var connection = client.handshake(std.Uri.parse("wss://example.com/") catch unreachable, &.{});
-	defer connection.deinit();
+	const uri = std.Uri.parse("wss://example.com/") catch unreachable;
+	var connection = client.handshake(uri, null);
+	defer connection.deinit(null);
 	
-	while (try connection.readMessage()) |message| {
+	while (connection.readMessage()) |message| {
 		const payload_reader = message.payloadReader();
 		const payload = try payload_reader.readAllAlloc(gpa.allocator());
 		defer gpa.allocator().free(payload);
@@ -37,6 +45,17 @@ pub fn main() !void {
 			var buffered_writer = std.io.bufferedWriter(payload_writer.writer());
 			try std.json.stringify(buffered_writer.writer(), Data{ .int = 5, .string = "some value" }, .{});
 		}
+	} else |err| {
+		return err;
 	}
 }
 ```
+
+## Special Thanks
+
+- https://github.com/karlseguin/websocket.zig
+	- Being the original Websocket API that I looked at. Was very nice, but wanted something that had a closer API to the new `std.http` library
+	- Also, used the code from this as a framework for autobahn tests :)
+- https://github.com/crossbario/autobahn-testsuite
+    - Integration testing suite for websocket clients
+	- Solved a lot of bugs!

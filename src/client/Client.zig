@@ -10,7 +10,7 @@ http_client: std.http.Client,
 
 const Client = @This();
 
-pub fn init(allocator: std.mem.Allocator) !Client {
+pub fn init(allocator: std.mem.Allocator) Client {
     const http_client = std.http.Client{ .allocator = allocator };
     return .{ .http_client = http_client };
 }
@@ -18,7 +18,7 @@ pub fn init(allocator: std.mem.Allocator) !Client {
 pub fn handshake(
     self: *Client,
     uri: std.Uri,
-    extra_headers: []const std.http.Header,
+    extra_headers: ?[]const std.http.Header,
 ) !client.Connection {
     var buf: [1000]u8 = undefined;
     const websocket_key = generateRandomWebsocketKey();
@@ -27,8 +27,9 @@ pub fn handshake(
     headers.append(std.http.Header{ .name = "Upgrade", .value = "websocket" }) catch unreachable;
     headers.append(std.http.Header{ .name = "Sec-WebSocket-Key", .value = &websocket_key }) catch unreachable;
     headers.append(std.http.Header{ .name = "Sec-WebSocket-Version", .value = "13" }) catch unreachable;
-    try headers.appendSlice(extra_headers);
-
+    if (extra_headers) |extra| {
+        try headers.appendSlice(extra);
+    }
     var req = try self.http_client.open(.GET, uri, .{
         .server_header_buffer = &buf,
         .headers = .{
@@ -42,6 +43,7 @@ pub fn handshake(
     try req.wait();
 
     if (req.response.status != .switching_protocols) {
+        std.log.err("expected status 101 SWITCHING PROTOCOLS, got {d} {s}", .{ @intFromEnum(req.response.status), req.response.status.phrase() orelse "{unknown}" });
         return error.NotWebsocketServer;
     }
 
@@ -53,7 +55,7 @@ pub fn handshake(
     while (headers_iter.next()) |header| {
         if (std.mem.eql(u8, header.name, "Upgrade")) {
             upgrade_seen = true;
-            if (!std.mem.eql(u8, header.value, "websocket")) {
+            if (!std.ascii.eqlIgnoreCase(header.value, "websocket")) {
                 return error.NotWebsocketServer;
             }
         }
