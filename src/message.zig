@@ -4,8 +4,17 @@ const ws = @import("./root.zig");
 pub const frame = @import("./message/frame.zig");
 pub const reader = @import("./message/reader.zig");
 pub const writer = @import("./message/writer.zig");
+
 pub const AnyMessageReader = reader.AnyMessageReader;
 pub const AnyMessageWriter = writer.AnyMessageWriter;
+
+pub const SingleFrameMessageWriter = writer.SingleFrameMessageWriter;
+pub const MultiFrameMessageWriter = writer.MultiFrameMessageWriter;
+
+pub const SingleFrameMessageReader = reader.UnfragmentedMessageReader;
+pub const MultiFrameMessageReader = reader.FragmentedMessageReader;
+
+pub const MessageType = writer.MessageType;
 
 pub const ControlFrameHeaderHandlerFn = *const ControlFrameHeaderHandlerFnBody;
 pub const ControlFrameHeaderHandlerFnBody = fn (
@@ -30,7 +39,7 @@ pub fn controlFrameHandlerWithMask(comptime mask: ws.message.frame.Mask) Control
                 .ping => {
                     var received_payload = std.io.fixedBufferStream(payload.slice());
                     var control_message_writer = ws.message.AnyMessageWriter.initControl(conn_writer, frame_header.payload_len, .pong, mask);
-                    const payload_writer = control_message_writer.payload_writer();
+                    const payload_writer = control_message_writer.payloadWriter();
                     var fifo = std.fifo.LinearFifo(u8, .{ .Static = 1000 }).init();
                     try fifo.pump(received_payload.reader(), payload_writer);
                 },

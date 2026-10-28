@@ -5,11 +5,11 @@ pub const AnyMessageReader = union(enum) {
     unfragmented: UnfragmentedMessageReader,
     fragmented: FragmentedMessageReader,
 
-    pub fn readFrom(reader: std.io.AnyReader, control_frame_handler: ws.message.ControlFrameHeaderHandlerFn, control_frame_writer: std.io.AnyWriter) !AnyMessageReader {
-        const header = try ws.message.frame.AnyFrameHeader.readFrom(reader);
-        const basic_header = header.asMostBasicHeader();
+    pub fn readFrom(reader: std.io.AnyReader, controlFrameHandler: ws.message.ControlFrameHeaderHandlerFn, control_frame_writer: std.io.AnyWriter) !AnyMessageReader {
+        // loop through messages until a non-control header is found
+        const header = try readUntilDataFrameHeader(controlFrameHandler, reader, control_frame_writer);
 
-        if (basic_header.fin) {
+        if (header.asMostBasicHeader().fin) {
             return .{
                 .unfragmented = UnfragmentedMessageReader{
                     .underlying_reader = reader,
@@ -22,7 +22,7 @@ pub const AnyMessageReader = union(enum) {
             return .{
                 .fragmented = FragmentedMessageReader{
                     .state = .{ .in_payload = .{ .header = header, .idx = 0, .payload_len = payload_len } },
-                    .control_frame_handler = control_frame_handler,
+                    .controlFrameHandler = controlFrameHandler,
                     .control_frame_writer = control_frame_writer,
                     .underlying_reader = reader,
                     .first_header = header,
@@ -42,29 +42,15 @@ pub const AnyMessageReader = union(enum) {
 pub const FragmentedMessageReader = struct {
     underlying_reader: std.io.AnyReader,
     control_frame_writer: std.io.AnyWriter,
-    control_frame_handler: ws.message.ControlFrameHeaderHandlerFn,
+    controlFrameHandler: ws.message.ControlFrameHeaderHandlerFn,
     first_header: ws.message.frame.AnyFrameHeader,
     state: State,
 
     pub fn read(self: *FragmentedMessageReader, bytes: []u8) anyerror!usize {
         switch (self.state) {
             .waiting_for_next_header => {
-                const header = try ws.message.frame.AnyFrameHeader.readFrom(self.underlying_reader);
-                if (header.asMostBasicHeader().opcode.isControlFrame()) {
-                    const control_frame_header: ws.message.frame.FrameHeader(.u16, false) = switch (header) {
-                        .u16_unmasked => |impl| impl,
-                        else => return error.InvalidControlFrameHeader,
-                    };
-                    var payload = try std.BoundedArray(u8, 125).init(control_frame_header.payload_len);
-                    const n = try self.underlying_reader.readAll(payload.slice());
-                    if (n != control_frame_header.payload_len) {
-                        return error.UnexpectedEndOfStream;
-                    }
-                    try self.control_frame_handler(self.control_frame_writer, control_frame_header, payload);
+                const header = try readUntilDataFrameHeader(self.controlFrameHandler, self.underlying_reader, self.control_frame_writer);
 
-                    // interrupted by a control frame, try reading again
-                    return read(self, bytes);
-                }
                 const payload_len = header.getPayloadLen() catch return error.PayloadTooLong;
                 self.state = .{ .in_payload = .{ .header = header, .idx = 0, .payload_len = payload_len } };
             },
@@ -139,6 +125,32 @@ pub const UnfragmentedMessageReader = struct {
     }
 };
 
+/// loops through messages until a non-control frame is found, calling controlFrameHandler on each control frame.
+fn readUntilDataFrameHeader(
+    controlFrameHandler: ws.message.ControlFrameHeaderHandlerFn,
+    reader: std.io.AnyReader,
+    writer: std.io.AnyWriter,
+) !ws.message.frame.AnyFrameHeader {
+    while (true) {
+        const current_header = try ws.message.frame.AnyFrameHeader.readFrom(reader);
+        if (current_header.asMostBasicHeader().opcode.isControlFrame()) {
+            const control_frame_header: ws.message.frame.FrameHeader(.u16, false) = switch (current_header) {
+                .u16_unmasked => |impl| impl,
+                else => return error.InvalidControlFrameHeader,
+            };
+
+            var payload = try std.BoundedArray(u8, 125).init(control_frame_header.payload_len);
+            const n = try reader.readAll(payload.slice());
+            if (n != control_frame_header.payload_len) {
+                return error.UnexpectedEndOfStream;
+            }
+            try controlFrameHandler(writer, control_frame_header, payload);
+            continue;
+        }
+        return current_header;
+    }
+}
+
 /// toggles the bytes between masked/unmasked form.
 pub fn mask_unmask(payload_start: usize, masking_key: [4]u8, bytes: []u8) void {
     for (payload_start.., bytes) |payload_idx, *transformed_octet| {
@@ -163,6 +175,7 @@ test "A single-frame unmasked text message" {
     try std.testing.expectEqualStrings("Hello", output.constSlice());
 }
 
+// technically server-to-client messages should never be masked, but maybe one day MessageReader will be re-used to make a Websocket Server...
 test "A single-frame masked text message" {
     const bytes = [_]u8{ 0x81, 0x85, 0x37, 0xfa, 0x21, 0x3d, 0x7f, 0x9f, 0x4d, 0x51, 0x58 };
     var stream = std.io.fixedBufferStream(&bytes);

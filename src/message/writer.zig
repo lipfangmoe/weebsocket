@@ -2,53 +2,55 @@ const std = @import("std");
 const ws = @import("../root.zig");
 
 pub const AnyMessageWriter = union(enum) {
-    unfragmented: UnfragmentedMessageWriter,
-    fragmented: FragmentedMessageWriter,
+    unfragmented: SingleFrameMessageWriter,
+    fragmented: MultiFrameMessageWriter,
+
+    pub fn wrap(message_writer: anytype) AnyMessageWriter {
+        return switch (@TypeOf(message_writer)) {
+            SingleFrameMessageWriter => .{ .unfragmented = message_writer },
+            MultiFrameMessageWriter => .{ .fragmented = message_writer },
+            else => |T| @compileError("only FragmentedMessageWriter or UnfragmentedMessageWriter may be passed to AnyMessageWriter.wrap(), got " ++ @typeName(T)),
+        };
+    }
 
     /// Creates a single-shot message writer. Also known as an "unfragmented" message.
-    pub fn init(underlying_writer: std.io.AnyWriter, message_len: usize, message_type: MessageType, mask: ws.message.frame.Mask) AnyMessageWriter {
+    pub fn init(underlying_writer: std.io.AnyWriter, message_len: usize, message_type: MessageType, mask: ws.message.frame.Mask) SingleFrameMessageWriter {
         const opcode: ws.message.frame.Opcode = switch (message_type) {
             .text => .text,
             .binary => .binary,
         };
-        return AnyMessageWriter{
-            .unfragmented = UnfragmentedMessageWriter{
-                .underlying_writer = underlying_writer,
-                .frame_header = ws.message.frame.AnyFrameHeader.init(true, opcode, message_len, mask),
-            },
+        return SingleFrameMessageWriter{
+            .underlying_writer = underlying_writer,
+            .frame_header = ws.message.frame.AnyFrameHeader.init(true, opcode, message_len, mask),
         };
     }
 
     /// Creates a message which can be written to over multiple frames. Also known as a "fragmented" message.
     /// Must be closed before any other messages can be sent.
-    pub fn initUnknownLength(underlying_writer: std.io.AnyWriter, message_type: MessageType, mask: ws.message.frame.Mask) AnyMessageWriter {
+    pub fn initUnknownLength(underlying_writer: std.io.AnyWriter, message_type: MessageType, mask: ws.message.frame.Mask) MultiFrameMessageWriter {
         const opcode: ws.message.frame.Opcode = switch (message_type) {
             .text => .text,
             .binary => .binary,
         };
-        return AnyMessageWriter{
-            .fragmented = FragmentedMessageWriter{
-                .underlying_writer = underlying_writer,
-                .opcode = opcode,
-                .mask = mask,
-            },
+        return MultiFrameMessageWriter{
+            .underlying_writer = underlying_writer,
+            .opcode = opcode,
+            .mask = mask,
         };
     }
 
     /// Creates a control message, which are internal to the websocket protocol and should be controlled by the library.
-    /// Should only be used for manually sending pings or creating a control message handler.
-    pub fn initControl(underlying_writer: std.io.AnyWriter, message_len: usize, opcode: ws.message.frame.Opcode, mask: ws.message.frame.Mask) AnyMessageWriter {
-        return AnyMessageWriter{
-            .unfragmented = UnfragmentedMessageWriter{
-                .underlying_writer = underlying_writer,
-                .frame_header = ws.message.frame.AnyFrameHeader.init(true, opcode, message_len, mask),
-            },
+    /// Should only be used for creating a control message handler.
+    pub fn initControl(underlying_writer: std.io.AnyWriter, message_len: usize, opcode: ws.message.frame.Opcode, mask: ws.message.frame.Mask) SingleFrameMessageWriter {
+        return SingleFrameMessageWriter{
+            .underlying_writer = underlying_writer,
+            .frame_header = ws.message.frame.AnyFrameHeader.init(true, opcode, message_len, mask),
         };
     }
 
-    pub fn payload_writer(self: *AnyMessageWriter) std.io.AnyWriter {
+    pub fn payloadWriter(self: *AnyMessageWriter) std.io.AnyWriter {
         const writer_impl = switch (self.*) {
-            inline else => |*impl| impl.payload_writer(),
+            inline else => |*impl| impl.payloadWriter(),
         };
         return writer_impl;
     }
@@ -63,13 +65,13 @@ pub const AnyMessageWriter = union(enum) {
 
 /// Represents an outgoing message that may span multiple frames. Each call to write() will send a websocket frame, so
 /// it's a good idea to wrap this in a std.io.BufferedWriter
-pub const FragmentedMessageWriter = struct {
+pub const MultiFrameMessageWriter = struct {
     underlying_writer: std.io.AnyWriter,
     opcode: ws.message.frame.Opcode,
     mask: ws.message.frame.Mask,
 
     /// Writes data to the message as a single websocket frame
-    pub fn write(self: *FragmentedMessageWriter, bytes: []const u8) anyerror!usize {
+    pub fn write(self: *MultiFrameMessageWriter, bytes: []const u8) anyerror!usize {
         const frame_header = ws.message.frame.AnyFrameHeader.init(false, self.opcode, bytes.len, self.mask);
 
         // make sure that all but the first frame are continuation frames
@@ -80,13 +82,13 @@ pub const FragmentedMessageWriter = struct {
         return bytes.len;
     }
 
-    pub fn closeWithWrite(self: *FragmentedMessageWriter, bytes: []const u8) !void {
+    pub fn closeWithWrite(self: *MultiFrameMessageWriter, bytes: []const u8) !void {
         const frame_header = ws.message.frame.AnyFrameHeader.init(true, self.opcode, bytes.len, self.mask);
 
         try self.writeAndMaybeMask(frame_header, bytes);
     }
 
-    fn writeAndMaybeMask(self: *FragmentedMessageWriter, frame_header: ws.message.frame.AnyFrameHeader, payload: []const u8) !void {
+    fn writeAndMaybeMask(self: *MultiFrameMessageWriter, frame_header: ws.message.frame.AnyFrameHeader, payload: []const u8) !void {
         try frame_header.writeTo(self.underlying_writer);
 
         // do simple case if no mask
@@ -111,30 +113,34 @@ pub const FragmentedMessageWriter = struct {
     }
 
     fn typeErasedWriteFn(ctx: *const anyopaque, bytes: []const u8) anyerror!usize {
-        const ptr: *FragmentedMessageWriter = @constCast(@alignCast(@ptrCast(ctx)));
+        const ptr: *MultiFrameMessageWriter = @constCast(@alignCast(@ptrCast(ctx)));
         return write(ptr, bytes);
     }
 
-    pub fn payload_writer(self: *FragmentedMessageWriter) std.io.AnyWriter {
+    pub fn payloadWriter(self: *MultiFrameMessageWriter) std.io.AnyWriter {
         return std.io.AnyWriter{
             .context = @ptrCast(self),
             .writeFn = typeErasedWriteFn,
         };
     }
 
-    pub fn close(self: *FragmentedMessageWriter) !void {
+    pub fn close(self: *MultiFrameMessageWriter) !void {
         try closeWithWrite(self, &.{});
+    }
+
+    pub fn any(self: MultiFrameMessageWriter) AnyMessageWriter {
+        return .{ .fragmented = self };
     }
 };
 
-pub const UnfragmentedMessageWriter = struct {
+pub const SingleFrameMessageWriter = struct {
     underlying_writer: std.io.AnyWriter,
     frame_header: ws.message.frame.AnyFrameHeader,
     header_written: bool = false,
     payload_bytes_written: usize = 0,
 
     /// Writes data to the message as a single websocket frame
-    pub fn write(self: *UnfragmentedMessageWriter, bytes: []const u8) anyerror!usize {
+    pub fn write(self: *SingleFrameMessageWriter, bytes: []const u8) anyerror!usize {
         if (!self.header_written) {
             try self.frame_header.writeTo(self.underlying_writer);
             self.header_written = true;
@@ -168,16 +174,85 @@ pub const UnfragmentedMessageWriter = struct {
     }
 
     fn typeErasedWriteFn(ctx: *const anyopaque, bytes: []const u8) anyerror!usize {
-        const ptr: *UnfragmentedMessageWriter = @constCast(@alignCast(@ptrCast(ctx)));
+        const ptr: *SingleFrameMessageWriter = @constCast(@alignCast(@ptrCast(ctx)));
         return write(ptr, bytes);
     }
 
-    pub fn payload_writer(self: *UnfragmentedMessageWriter) std.io.AnyWriter {
+    pub fn payloadWriter(self: *SingleFrameMessageWriter) std.io.AnyWriter {
         return std.io.AnyWriter{
             .context = @ptrCast(self),
             .writeFn = typeErasedWriteFn,
         };
     }
+
+    pub fn any(self: SingleFrameMessageWriter) AnyMessageWriter {
+        return .{ .unfragmented = self };
+    }
 };
 
-pub const MessageType = enum { text, binary };
+pub const MessageType = enum {
+    /// Indicates that the message is a valid UTF-8 string.
+    text,
+    /// Indicates that the message is binary data with no guarantees about encoding.
+    binary,
+};
+
+// these tests come from the spec
+
+test "A single-frame unmasked text message" {
+    const message_payload = "Hello";
+    var output = std.BoundedArray(u8, 100){};
+    var message = AnyMessageWriter.init(output.writer().any(), message_payload.len, .text, .unmasked);
+    var payload_writer = message.payloadWriter();
+    try payload_writer.writeAll(message_payload);
+
+    const expected = [_]u8{ 0x81, 0x05, 0x48, 0x65, 0x6c, 0x6c, 0x6f };
+    try std.testing.expectEqualSlices(u8, &expected, output.constSlice());
+}
+
+test "A single-frame masked text message" {
+    const message_payload = "Hello";
+    var output = std.BoundedArray(u8, 100){};
+    var message = AnyMessageWriter.init(output.writer().any(), message_payload.len, .text, .{ .fixed_mask = 0x37fa213d });
+    var payload_writer = message.payloadWriter();
+    try payload_writer.writeAll(message_payload);
+
+    const expected = [_]u8{ 0x81, 0x85, 0x37, 0xfa, 0x21, 0x3d, 0x7f, 0x9f, 0x4d, 0x51, 0x58 };
+    try std.testing.expectEqualSlices(u8, &expected, output.constSlice());
+}
+
+test "A fragmented unmasked text message" {
+    var output = std.BoundedArray(u8, 100){};
+    var message = AnyMessageWriter.initUnknownLength(output.writer().any(), .text, .unmasked);
+    _ = try message.payloadWriter().write("Hel");
+    _ = try message.closeWithWrite("lo");
+
+    const expected = [_]u8{ 0x01, 0x03, 0x48, 0x65, 0x6c, 0x80, 0x02, 0x6c, 0x6f };
+    try std.testing.expectEqualSlices(u8, &expected, output.constSlice());
+}
+
+test "(not in spec) A fragmented unmasked text message interrupted with a masked control frame" {
+    var output = std.BoundedArray(u8, 100){};
+    var message = AnyMessageWriter.initUnknownLength(output.writer().any(), .text, .unmasked);
+
+    _ = try message.payloadWriter().write("Hel");
+
+    // simulate pong response in the middle of fragmented payload
+    const pong_payload = "Hello";
+    var pong = AnyMessageWriter.initControl(output.writer().any(), pong_payload.len, .pong, .{ .fixed_mask = 0x37fa213d });
+    try pong.payloadWriter().writeAll(pong_payload);
+
+    _ = try message.closeWithWrite("lo");
+
+    const expected = [_]u8{
+        // first fragment: "Hel"
+        0x01, 0x03, 0x48, 0x65, 0x6c,
+        // interrupted by masked control frame, PONG "Hello"
+        0x8a, 0x85, 0x37, 0xfa, 0x21,
+        0x3d, 0x7f, 0x9f, 0x4d, 0x51,
+        0x58,
+        // second fragment: "lo"
+        0x80, 0x02, 0x6c, 0x6f,
+    };
+    try std.testing.expectEqualSlices(u8, &expected, output.constSlice());
+}

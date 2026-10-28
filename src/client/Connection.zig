@@ -19,11 +19,11 @@ pub fn init(http_request: std.http.Client.Request) Connection {
 /// Sends a close request to the server, and returns an iterator of the remaining messages that the server sends.
 ///
 /// Note: if including a payload, the first two bytes MUST be a status found in TerminationStatus.
-pub fn closeAndFlush(self: *Connection, payload: ?[]const u8) !FlushMessagesAfterCloseIterator {
-    const payload_nn = payload orelse &.{};
+pub fn closeAndFlush(self: *Connection, payload: ?std.BoundedArray(u8, 125)) !FlushMessagesAfterCloseIterator {
+    const payload_nn = payload orelse std.BoundedArray(u8, 125){};
     const conn_writer = self.http_request.writer();
     var message_writer = ws.message.AnyMessageWriter.initControl(conn_writer.any(), payload_nn.len, .close, .random_mask);
-    try message_writer.payload_writer().writeAll(payload_nn);
+    try message_writer.payloadWriter().writeAll(payload_nn.slice());
 
     self.closing = true;
 
@@ -31,7 +31,7 @@ pub fn closeAndFlush(self: *Connection, payload: ?[]const u8) !FlushMessagesAfte
 }
 
 /// Sends a close request to the server, and waits for a close response. `payload` is an optional byte sequence to send to the server.
-pub fn close(self: *Connection, payload: ?[]const u8) void {
+pub fn close(self: *Connection, payload: ?std.BoundedArray(u8, 125)) void {
     var iterator = closeAndFlush(self, payload) catch {
         self.deinit_force();
         return;
@@ -44,29 +44,63 @@ pub fn close(self: *Connection, payload: ?[]const u8) void {
     self.deinit_force();
 }
 
-/// It is HIGHLY RECOMMENDED to call `close()` instead.
+/// It is highly recommended to call `close()` instead, but this function allows to
 ///
 /// Frees all resources related to this connection, immediately closing the HTTP connection.
 pub fn deinit_force(self: *Connection) void {
+    self.closing = true;
     self.http_request.deinit();
 }
 
-pub fn readMessage(self: *Connection) !ws.message.AnyMessageReader {
-    _ = self;
-    @panic("TODO");
+/// Sends a PING control message to the server. The server should respond with PONG soon after. In order to receive the PONG, you must
+/// have supplied the Connection object with a Control Frame Handler.
+pub fn ping(self: *Connection, payload: ?std.BoundedArray(u8, 125)) !void {
+    const payload_nn = payload orelse std.BoundedArray(u8, 125){};
+    const conn_writer = self.http_request.writer();
+    var message_writer = ws.message.AnyMessageWriter.initControl(conn_writer.any(), payload_nn.len, .ping, .random_mask);
+    try message_writer.payloadWriter().writeAll(payload_nn.slice());
 }
 
-pub fn writeMessage(self: *Connection, message: ws.message.AnyMessageWriter) !void {
+pub fn readMessage(self: *Connection) !ws.MessageReader {
+    return try ws.MessageReader.readFrom(
+        self.http_request.reader().any(),
+        self.control_frame_handler,
+        self.http_request.writer().any(),
+    );
+}
+
+/// Writes a byte string as a websocket message. `message` should be UTF-8 encoded.
+pub fn writeMessageString(self: *Connection, message: []const u8) !void {
+    var message_writer = try self.writeMessageStream(.text, message.len);
+    try message_writer.payloadWriter().writeAll(message);
+}
+
+/// Writes a stream of bytes as a websocket message.
+pub fn writeMessageStream(self: *Connection, msg_type: ws.message.writer.MessageType, length: usize) !ws.message.SingleFrameMessageWriter {
     if (self.closing) {
         return error.Closing;
     }
-    _ = message;
-    @panic("TODO");
+    return ws.MessageWriter.init(self.http_request.writer().any(), length, msg_type, .random_mask);
 }
 
-pub const ClosePayload = struct {
-    status: ?TerminationStatus,
-    remaining_bytes: []const u8,
+/// Creates a MessageWriter, which writes a Websocket Frame Header, and then
+/// returns a Writer which can be used to write the websocket payload.
+///
+/// Each call to `write` will be written in its entirety to a new websocket frame. It is highly recommended
+/// to wrap the returned writer in a `std.io.BufferedWriter` in order to prevent excessive websocket frame headers.
+///
+/// Also, you must call `.close()` on the MessageWriter when you are finished writing the message.
+pub fn writeMessageStreamUnknownLength(self: *Connection, msg_type: ws.message.writer.MessageType) !ws.message.MultiFrameMessageWriter {
+    if (self.closing) {
+        return error.Closing;
+    }
+    return ws.MessageWriter.initUnknownLength(self.http_request.writer().any(), msg_type, .random_mask);
+}
+
+pub const MessagePayload = struct {
+    payload: std.io.AnyReader,
+    payload_len: ?usize,
+    type: ws.message.writer.MessageType,
 };
 
 pub const TerminationStatus = enum(u16) {
