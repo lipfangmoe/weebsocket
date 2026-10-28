@@ -288,10 +288,7 @@ fn readUntilDataFrameHeader(
     while (true) {
         const current_header = ws.message.frame.AnyFrameHeader.readFrom(underlying_reader) catch |err| return switch (err) {
             error.EndOfStream => error.EndOfStream,
-            else => {
-                ws.log.err("error occurred while parsing header: {}", .{err});
-                return error.InvalidMessage;
-            },
+            error.ReadFailed => return error.UnderlyingReadFailed,
         };
         const basic_header = current_header.asMostBasicHeader();
         if (basic_header.rsv1 or basic_header.rsv2 or basic_header.rsv3) {

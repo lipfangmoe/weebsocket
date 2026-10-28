@@ -27,7 +27,7 @@ pub const AnyFrameHeader = union(enum) {
             .{ .u80_unmasked = FrameHeader(.u80, false).init(final, opcode, @intCast(payload_len), mask) };
     }
 
-    pub fn readFrom(reader: *std.Io.Reader) !AnyFrameHeader {
+    pub fn readFrom(reader: *std.Io.Reader) error{ ReadFailed, EndOfStream }!AnyFrameHeader {
         const underlying_int = try reader.takeInt(u16, .big);
         const u16_unmasked: FrameHeader(.u16, false) = @bitCast(underlying_int);
         if (u16_unmasked.payload_len == 126) {
