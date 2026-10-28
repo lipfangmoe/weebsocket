@@ -291,14 +291,12 @@ pub const FlushMessagesAfterCloseIterator = struct {
     }
 };
 
-fn fmtCompactFn(
-    data: []const u8,
-    comptime _: []const u8,
-    _: std.fmt.FormatOptions,
-    fmt_writer: anytype,
-) !void {
+fn fmtCompactFn(data: []const u8, comptime _: []const u8, _: std.fmt.FormatOptions, fmt_writer: anytype) !void {
     if (data.len == 0) {
         return;
+    }
+    if (std.unicode.utf8ValidateSlice(data)) {
+        try fmt_writer.print("{s}", .{data});
     }
 
     var char_count: usize = 1;
