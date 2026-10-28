@@ -6,7 +6,7 @@ Zig Websocket Client (maybe Server one day). Does not implement any WebSocket ex
 
 - Zero-alloc after initial handshake
 - API somewhat reminescent of `std.http`
-- Passes all autobahn tests (except compression)
+- Passes all autobahn tests (except compression, since that is an extension that we don't implement)
   - Compression one day...?
 
 ## Add to your Project
