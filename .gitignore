@@ -1,3 +1,4 @@
 .zig-cache
 .vscode
 autobahn/client_test/reports
+zig-out
