@@ -26,10 +26,12 @@ pub fn fail(self: *Connection, payload: ?ClosePayload) void {
 /// Sends a close request to the server, and returns an iterator of the remaining messages that the server sends.
 pub fn deinitAndFlush(self: *Connection, payload: ?ClosePayload) FlushMessagesAfterCloseIterator {
     if (payload) |payload_nn| {
-        const reason = payload_nn.reason[0..123];
-        ws.log.debug("deinitAndFlush({{ .status=.{s}, .payload='{s}' }})", .{ @tagName(payload_nn.status), reason });
+        if (payload_nn.reason.len > 123) {
+            std.debug.panic("ClosePayload reason may not be longer than 123 bytes (len={})", .{payload_nn.reason.len});
+        }
+        ws.log.debug("deinitAndFlush({{ .status=.{s}, .payload='{s}' }})", .{ @tagName(payload_nn.status), payload_nn.reason });
         var buf: [200]u8 = undefined;
-        var message_writer = ws.message.SingleFrameMessageWriter.initControl(self.writer(), reason.len + 2, .close, .random_mask, &buf) catch |err| {
+        var message_writer = ws.message.SingleFrameMessageWriter.initControl(self.writer(), payload_nn.reason.len + 2, .close, .random_mask, &buf) catch |err| {
             ws.log.err("error while writing close header: {}", .{err});
             self.forceDeinit();
             return FlushMessagesAfterCloseIterator{ .conn = null };
@@ -42,7 +44,7 @@ pub fn deinitAndFlush(self: *Connection, payload: ?ClosePayload) FlushMessagesAf
             self.forceDeinit();
             return FlushMessagesAfterCloseIterator{ .conn = null };
         };
-        message_writer.interface.writeAll(reason) catch |err| {
+        message_writer.interface.writeAll(payload_nn.reason) catch |err| {
             ws.log.err("error occurred while writing close reason: {}", .{err});
             self.forceDeinit();
             return FlushMessagesAfterCloseIterator{ .conn = null };
