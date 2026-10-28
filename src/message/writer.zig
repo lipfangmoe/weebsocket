@@ -209,7 +209,7 @@ pub const FragmentedMessageWriter = struct {
         self.state.writing_payload.written += written;
 
         if (self.state.writing_payload.written == payload_len) {
-            if (self.state.writing_payload.header.asMostBasicHeader().fin) {
+            if (self.state.writing_payload.header.common().fin) {
                 self.state = .complete;
             } else {
                 self.state = .{ .waiting_for_begin_header_fragment = .{ .is_first = false } };

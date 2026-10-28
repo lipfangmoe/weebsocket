@@ -84,7 +84,7 @@ fn echoMessage(allocator: std.mem.Allocator, connection: *ws.Connection) EchoErr
         },
     };
 
-    if (header.asMostBasicHeader().fin) {
+    if (header.common().fin) {
         try echoUnfragmented(allocator, connection, &message, header);
     } else {
         try echoFragmented(connection, &message, header);
@@ -95,7 +95,7 @@ fn echoUnfragmented(allocator: std.mem.Allocator, connection: *ws.Connection, me
     const payload = message.interface.allocRemaining(allocator, .limited(100_000_000)) catch |err| return handleReadMessageError(err, message);
     defer allocator.free(payload);
 
-    const message_type: ws.message.Type = ws.message.Type.fromOpcode(header.asMostBasicHeader().opcode) catch .binary;
+    const message_type: ws.message.Type = ws.message.Type.fromOpcode(header.common().opcode) catch .binary;
     connection.sendMessage(message_type, payload) catch |err| return switch (err) {
         error.Overflow, error.EndOfStream, error.UnderlyingWriteFailed => error.UnexpectedError,
         error.ServerClosed => error.Graceful,
@@ -107,7 +107,7 @@ fn echoUnfragmented(allocator: std.mem.Allocator, connection: *ws.Connection, me
 }
 
 fn echoFragmented(connection: *ws.Connection, message: *ws.MessageReader, header: ws.message.frame.AnyFrameHeader) EchoError!void {
-    const message_type: ws.message.Type = ws.message.Type.fromOpcode(header.asMostBasicHeader().opcode) catch .binary;
+    const message_type: ws.message.Type = ws.message.Type.fromOpcode(header.common().opcode) catch .binary;
     var writer_buf: [10_000]u8 = undefined;
     var message_writer = connection.createMessageStreamUnknownLength(message_type, &writer_buf);
 

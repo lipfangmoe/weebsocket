@@ -70,7 +70,7 @@ pub const MessageReader = struct {
         std.debug.assert(self.state == .waiting_for_first_header or self.state == .waiting_for_next_header);
 
         const header = try readUntilDataFrameHeader(self.underlying_reader, self.control_frame_handler);
-        const basic_header = header.asMostBasicHeader();
+        const basic_header = header.common();
 
         // first header may never be a continuation header
         if (self.state == .waiting_for_first_header and basic_header.opcode == .continuation) {
@@ -128,7 +128,7 @@ pub const MessageReader = struct {
         const prev_state = self.state.reading_fragmented_payload;
         return self.streamPayload(w, limit) catch |err| switch (err) {
             error.EndOfFrame => {
-                if (prev_state.header.asMostBasicHeader().fin) {
+                if (prev_state.header.common().fin) {
                     self.state = .complete;
                 } else {
                     self.state = .{ .waiting_for_next_header = .{
@@ -152,8 +152,8 @@ pub const MessageReader = struct {
             else => unreachable,
         };
         const is_text = switch (self.state) {
-            .reading_unfragmented_payload => header.asMostBasicHeader().opcode == .text,
-            .reading_fragmented_payload => |frag| frag.first_header.asMostBasicHeader().opcode == .text,
+            .reading_unfragmented_payload => header.common().opcode == .text,
+            .reading_fragmented_payload => |frag| frag.first_header.common().opcode == .text,
             else => unreachable,
         };
         const payload_len = header.getPayloadLen() catch return error.PayloadTooLong;
@@ -169,7 +169,7 @@ pub const MessageReader = struct {
         };
         const is_final_frame = switch (self.state) {
             .reading_unfragmented_payload => true,
-            .reading_fragmented_payload => |frag| frag.header.asMostBasicHeader().fin,
+            .reading_fragmented_payload => |frag| frag.header.common().fin,
             else => unreachable,
         };
 
@@ -191,7 +191,7 @@ pub const MessageReader = struct {
         const partial_payload = readable[0..n];
 
         // unmask payload
-        if (header.asMostBasicHeader().mask) {
+        if (header.common().mask) {
             const masking_key = header.getMaskingKey() orelse {
                 ws.log.err("invalid header: mask bit is set but header does not have a masking key", .{});
                 return error.InvalidMessage;
@@ -290,26 +290,26 @@ fn readUntilDataFrameHeader(
             error.EndOfStream => error.EndOfStream,
             error.ReadFailed => return error.UnderlyingReadFailed,
         };
-        const basic_header = current_header.asMostBasicHeader();
+        const basic_header = current_header.common();
         if (basic_header.rsv1 or basic_header.rsv2 or basic_header.rsv3) {
             ws.log.err("reserve bits set rsv123=0b{b}{b}{b}", .{ @intFromBool(basic_header.rsv1), @intFromBool(basic_header.rsv2), @intFromBool(basic_header.rsv3) });
             return error.InvalidMessage;
         }
         if (basic_header.opcode.isControlFrame()) {
-            const control_frame_header: ws.message.frame.FrameHeader(.u16, false) = switch (current_header) {
-                .u16_unmasked => |impl| impl,
+            const control_frame_header: ws.message.frame.UnmaskedShortHeader = switch (current_header) {
+                .unmasked_short => |impl| impl,
                 else => |impl| {
                     ws.log.err("recevied control frame had a header of an unexpected size: {}", .{impl});
                     return error.InvalidMessage;
                 },
             };
-            if (!control_frame_header.fin) {
+            if (!control_frame_header.common.fin) {
                 ws.log.err("peer sent a control frame which is fragmented, which is not allowed", .{});
                 return error.InvalidMessage;
             }
 
             var payload_buf: [125]u8 = undefined;
-            const payload = payload_buf[0..control_frame_header.payload_len];
+            const payload = payload_buf[0..control_frame_header.common.payload_len];
             underlying_reader.readSliceAll(payload) catch |err| switch (err) {
                 error.ReadFailed => return error.UnderlyingReadFailed,
                 error.EndOfStream => return error.EndOfStream,
@@ -380,17 +380,18 @@ test "A fragmented unmasked text message" {
     try std.testing.expectEqualStrings("Hello", output[0..output_len]);
 }
 
-test "a long unfragmented unmasked message" {
-    const header: ws.message.frame.AnyFrameHeader = .{ .u32_unmasked = .{
-        .fin = true,
-        .opcode = .text,
-        .mask = false,
-        .masking_key = void{},
-        .payload_len = 126,
+test "a medium-length unfragmented unmasked message" {
+    const header: ws.message.frame.AnyFrameHeader = .{ .unmasked_medium = .{
+        .common = .{
+            .fin = true,
+            .opcode = .text,
+            .mask = false,
+            .payload_len = 126,
+            .rsv1 = false,
+            .rsv2 = false,
+            .rsv3 = false,
+        },
         .extended_payload_len = 10_000,
-        .rsv1 = false,
-        .rsv2 = false,
-        .rsv3 = false,
     } };
     const payload: [10_000]u8 = @splat(42);
 
@@ -449,6 +450,6 @@ const panic_control_frame_handler: ws.message.ControlFrameHandler = .{
     .handlerFn = panicControlFrameHandlerFn,
 };
 
-fn panicControlFrameHandlerFn(_: *const ws.message.ControlFrameHandler, _: ws.message.frame.FrameHeader(.u16, false), _: []const u8) ws.message.ControlFrameHandler.Error!void {
+fn panicControlFrameHandlerFn(_: *const ws.message.ControlFrameHandler, _: ws.message.frame.UnmaskedShortHeader, _: []const u8) ws.message.ControlFrameHandler.Error!void {
     @panic("nooo");
 }
