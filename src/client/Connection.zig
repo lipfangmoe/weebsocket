@@ -124,11 +124,11 @@ pub fn readMessage(self: *Connection) ReadMessageError!ws.MessageReader {
 }
 
 /// Prints some bytes as a websocket message.
-pub fn printMessage(self: *Connection, msg_type: ws.message.Type, comptime fmt: []const u8, args: anytype) !void {
+pub fn printMessage(self: *Connection, msg_type: ws.message.Type, comptime fmt: []const u8, args: anytype) WriteMessageError!void {
     const len = std.fmt.count(fmt, args);
 
     var message_writer = try self.writeMessageStream(msg_type, len);
-    try std.fmt.format(try message_writer.payloadWriter(), fmt, args);
+    try std.fmt.format(message_writer.payloadWriter(), fmt, args);
 }
 
 /// Writes some bytes as a websocket message.
@@ -265,13 +265,13 @@ pub const CloseStatus = enum(u16) {
 pub const FlushMessagesAfterCloseIterator = struct {
     conn: ?*Connection,
 
-    pub fn next(self: *FlushMessagesAfterCloseIterator) !?ws.message.AnyMessageReader {
+    pub fn next(self: *FlushMessagesAfterCloseIterator) error{ EndOfStream, Unknown }!?ws.message.AnyMessageReader {
         if (self.conn) |conn| {
             return conn.readMessage() catch |err| {
                 switch (err) {
                     error.ServerClosed => return null,
                     error.InvalidMessage => return null,
-                    else => return err,
+                    else => |err2| return err2,
                 }
             };
         }
