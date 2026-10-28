@@ -3,11 +3,7 @@ const ws = @import("../root.zig");
 const frame = ws.message.frame;
 
 http_request: std.http.Client.Request,
-control_frame_handler: *const fn (
-    self: *Connection,
-    frame.AnyFrameHeader,
-    []const u8,
-) std.io.AnyReader.Error!void,
+control_frame_handler: ws.message.ControlFrameHeaderHandlerFn,
 closing: bool,
 
 const Connection = @This();
@@ -15,7 +11,7 @@ const Connection = @This();
 pub fn init(http_request: std.http.Client.Request) Connection {
     return Connection{
         .http_request = http_request,
-        .control_frame_handler = &default_control_frame_handler,
+        .control_frame_handler = &ws.message.defaultControlFrameHandler,
         .closing = false,
     };
 }
@@ -24,8 +20,11 @@ pub fn init(http_request: std.http.Client.Request) Connection {
 ///
 /// Note: if including a payload, the first two bytes MUST be a status found in TerminationStatus.
 pub fn closeAndFlush(self: *Connection, payload: ?[]const u8) !FlushMessagesAfterCloseIterator {
-    const writer = self.http_request.writer();
-    try self.writeMessage(ws.message.AnyMessageWriter.initControl(writer.any(), .close, payload orelse &.{}));
+    const payload_nn = payload orelse &.{};
+    const conn_writer = self.http_request.writer();
+    var message_writer = ws.message.AnyMessageWriter.initControl(conn_writer.any(), payload_nn.len, .close, .random_mask);
+    try message_writer.payload_writer().writeAll(payload_nn);
+
     self.closing = true;
 
     return FlushMessagesAfterCloseIterator{ .conn = self };
@@ -63,29 +62,6 @@ pub fn writeMessage(self: *Connection, message: ws.message.AnyMessageWriter) !vo
     }
     _ = message;
     @panic("TODO");
-}
-
-fn default_control_frame_handler(
-    self: *Connection,
-    frame_header: frame.AnyFrameHeader,
-    frame_payload: []const u8, // control frames are always unfragmented
-) anyerror!void {
-    const opcode: frame.Opcode = switch (frame_header) {
-        inline else => |header| header.opcode,
-    };
-    std.debug.assert(opcode.is_control_frame());
-
-    const writer = self.http_request.writer();
-    switch (opcode) {
-        .ping => {
-            try self.writeMessage(ws.message.AnyMessageWriter.initControl(writer.any(), .pong, frame_payload));
-        },
-        .pong => {},
-        .close => {
-            return error.Closing;
-        },
-        else => unreachable,
-    }
 }
 
 pub const ClosePayload = struct {
