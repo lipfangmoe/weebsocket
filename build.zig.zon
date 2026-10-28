@@ -1,5 +1,5 @@
 .{
-    .name = "dweebsocket",
-    .version = "0.1.0",
+    .name = "weebsocket",
+    .version = "0.1.1",
     .paths = .{ "src", ".gitignore", "build.zig", "build.zig.zon", "README.md" },
 }
