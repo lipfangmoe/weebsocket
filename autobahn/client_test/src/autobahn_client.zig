@@ -1,14 +1,38 @@
 const std = @import("std");
 const ws = @import("weebsocket");
 
-pub const std_options: std.Options = .{ .log_level = .info };
+pub const std_options: std.Options = .{
+    .log_level = .debug,
+    .logFn = logFn,
+};
+
+fn logFn(
+    comptime message_level: std.log.Level,
+    comptime scope: @EnumLiteral(),
+    comptime format: []const u8,
+    args: anytype,
+) void {
+    var io_impl = std.Io.Threaded.init_single_threaded;
+    const io: std.Io = io_impl.io();
+    const since_epoch = std.Io.Clock.now(.real, io);
+
+    const epoch_seconds: std.time.epoch.EpochSeconds = .{ .secs = @intCast(since_epoch.toSeconds()) };
+    const day_seconds = epoch_seconds.getDaySeconds();
+
+    const hour_gmt = day_seconds.getHoursIntoDay();
+    const hour = if (hour_gmt >= 7) hour_gmt - 7 else hour_gmt + (24 - 7);
+    const min = day_seconds.getMinutesIntoHour();
+    const sec = day_seconds.getSecondsIntoMinute();
+    const milli = std.math.comptimeMod(since_epoch.toMilliseconds(), std.time.ms_per_s);
+    std.log.defaultLog(message_level, scope, "{d:0>2}:{d:0>2}:{d:0>2}.{d:0>3} " ++ format, .{ hour, min, sec, milli } ++ args);
+}
 
 pub fn main(init: std.process.Init) !void {
     try init.io.sleep(.fromSeconds(5), .awake);
 
     defer updateReport(init.io, init.gpa) catch unreachable;
 
-    const specific_cases: ?[]const []const u8 = &.{"1.1.6"}; // can set to a specific test with &.{"1.1.6"}
+    const specific_cases: ?[]const []const u8 = null; // can set to a specific test with &.{"1.1.6"}
 
     for (specific_cases orelse &all_cases) |case| {
         std.log.info("====== running case: {s} ======", .{case});
@@ -18,53 +42,101 @@ pub fn main(init: std.process.Init) !void {
 
         const uri_str = try std.fmt.allocPrint(init.gpa, "ws://localhost:9001/runCase?casetuple={s}&agent=weebsocket", .{case});
         defer init.gpa.free(uri_str);
-        std.log.info("establishing connection: {s}", .{uri_str});
         var connection = client.handshake(try std.Uri.parse(uri_str), null) catch |err| {
             std.log.err("error during handshake: {}", .{err});
             continue;
         };
-        defer connection.deinit(null);
+        errdefer connection.deinit(init.io, null);
 
         while (true) {
-            echo(init.gpa, &connection) catch |err| {
+            echoMessage(init.gpa, &connection) catch |err| {
                 switch (err) {
-                    error.Expected => break,
-                    error.Unexpected => return err,
+                    error.Graceful => {
+                        connection.deinit(init.io, null);
+                        break;
+                    },
+                    error.InconsistentFormat => {
+                        connection.deinit(init.io, .initWithStatus(.inconsistent_format, "inconsistent format"));
+                        break;
+                    },
+                    error.ProtocolError => {
+                        connection.deinit(init.io, .initWithStatus(.protocol_error, "protocol error"));
+                        break;
+                    },
+                    error.UnexpectedError => return err,
                 }
             };
         }
-        connection.deinit(null);
     }
 }
 
-const EchoError = error{ Expected, Unexpected };
-fn echo(allocator: std.mem.Allocator, connection: *ws.Connection) !void {
-    var message = connection.receiveMessage();
+const EchoError = error{ Graceful, ProtocolError, InconsistentFormat, UnexpectedError };
+fn echoMessage(allocator: std.mem.Allocator, connection: *ws.Connection) EchoError!void {
+    var buf: [8000]u8 = undefined;
+    var message = connection.receiveMessage(&buf);
     const header = message.getHeader() catch |err| return switch (err) {
-        error.UnderlyingReadFailed, error.UnderlyingWriteFailed, error.UnderlyingControlFrameWriteFailed => error.Unexpected,
+        error.UnderlyingReadFailed, error.UnderlyingWriteFailed, error.UnderlyingControlFrameWriteFailed => error.UnexpectedError,
+        error.ReceivedCloseFrame => error.Graceful,
+        error.InvalidUtf8 => error.InconsistentFormat,
         else => {
             std.log.info("error reading message header: {}", .{err});
-            return error.Expected;
+            return error.ProtocolError;
         },
     };
 
-    const payload_max_len = header.getPayloadLen() catch return error.Expected;
-    const payload = message.interface.readAlloc(allocator, payload_max_len) catch |err| return switch (message.state.err) {
-        error.UnderlyingReadFailed, error.UnderlyingWriteFailed, error.UnderlyingControlFrameWriteFailed => error.Unexpected,
-        else => {
-            std.log.info("error writing message header: {}", .{err});
-            return error.Expected;
-        },
-    };
+    if (header.asMostBasicHeader().fin) {
+        try echoUnfragmented(allocator, connection, &message, header);
+    } else {
+        try echoFragmented(connection, &message, header);
+    }
+}
+
+fn echoUnfragmented(allocator: std.mem.Allocator, connection: *ws.Connection, message: *ws.MessageReader, header: ws.message.frame.AnyFrameHeader) EchoError!void {
+    const payload = message.interface.allocRemaining(allocator, .limited(100_000_000)) catch |err| return handleReadMessageError(err, message);
     defer allocator.free(payload);
 
-    const message_type: ws.message.Type = ws.message.Type.fromOpcode(header.asMostBasicHeader().opcode) catch return error.Unexpected;
+    const message_type: ws.message.Type = ws.message.Type.fromOpcode(header.asMostBasicHeader().opcode) catch .binary;
     connection.sendMessage(message_type, payload) catch |err| return switch (err) {
-        error.Overflow, error.EndOfStream, error.UnderlyingWriteFailed => error.Unexpected,
+        error.Overflow, error.EndOfStream, error.UnderlyingWriteFailed => error.UnexpectedError,
+        error.ServerClosed => error.Graceful,
         else => {
-            std.log.info("error writing message header: {}", .{err});
-            return error.Expected;
+            std.log.info("error writing message: {}", .{err});
+            return error.ProtocolError;
         },
+    };
+}
+
+fn echoFragmented(connection: *ws.Connection, message: *ws.MessageReader, header: ws.message.frame.AnyFrameHeader) EchoError!void {
+    const message_type: ws.message.Type = ws.message.Type.fromOpcode(header.asMostBasicHeader().opcode) catch .binary;
+    var writer_buf: [10_000]u8 = undefined;
+    var message_writer = connection.createMessageStreamUnknownLength(message_type, &writer_buf);
+
+    var buf: [10_000]u8 = undefined;
+    while (true) {
+        const n = message.interface.readSliceShort(&buf) catch |err| return handleReadMessageError(err, message);
+
+        message_writer.beginPayloadFragment(n, n < buf.len) catch |err| return handleReadMessageError(err, message);
+
+        message_writer.interface.writeAll(buf[0..n]) catch |err| return handleReadMessageError(err, message);
+        message_writer.interface.flush() catch |err| return handleReadMessageError(err, message);
+        if (n < buf.len) {
+            break;
+        }
+    }
+}
+
+fn handleReadMessageError(err: anyerror, message: *const ws.MessageReader) EchoError {
+    return switch (err) {
+        error.ReadFailed => switch (message.state.err) {
+            error.UnderlyingReadFailed, error.UnderlyingWriteFailed, error.UnderlyingControlFrameWriteFailed => error.UnexpectedError,
+            error.ReceivedCloseFrame => error.Graceful,
+            error.InvalidUtf8 => error.InconsistentFormat,
+            else => {
+                std.log.info("error reading message: {}", .{message.state.err});
+                return error.ProtocolError;
+            },
+        },
+        else => error.UnexpectedError,
     };
 }
 
@@ -74,19 +146,7 @@ fn updateReport(io: std.Io, allocator: std.mem.Allocator) !void {
     defer client.deinit();
     const uri = std.Uri.parse("ws://localhost:9001/updateReports?agent=weebsocket") catch unreachable;
     var connection = try client.handshake(uri, null);
-    defer connection.deinit(null);
-}
-
-fn noMaxDepthFormatFn(
-    data: ws.MessageReader,
-    comptime fmt: []const u8,
-    options: std.fmt.FormatOptions,
-    writer: anytype,
-) !void {
-    try std.fmt.formatType(data, fmt, options, writer, 1000);
-}
-fn fmtNoMaxDepth(data: ws.MessageReader) std.fmt.Formatter(noMaxDepthFormatFn) {
-    return std.fmt.Formatter(noMaxDepthFormatFn){ .data = data };
+    defer connection.deinit(io, null);
 }
 
 // zig fmt: off

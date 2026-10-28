@@ -2,393 +2,291 @@ const std = @import("std");
 const ws = @import("../root.zig");
 const utf8_validator = @import("./utf8_validator.zig");
 
-pub const ReadHeaderError = error{
-    EndOfStream,
-    ReceivedCloseFrame,
-    InvalidMessage,
-    PayloadTooLong,
-    UnexpectedReadFailure,
-    UnexpectedControlFrameResponseFailure,
-} || std.Io.Cancelable;
-pub const StreamPayloadError = error{
-    EndOfStream,
-    PayloadTooLong,
-    InvalidMessage,
-    UnexpectedReadFailure,
-    UnexpectedWriteFailure,
-    InvalidUtf8,
-} || std.Io.Cancelable || std.Io.Writer.Error;
-pub const StreamError = ReadHeaderError || StreamPayloadError;
-
 pub const MessageReader = struct {
+    interface: std.Io.Reader,
     underlying_reader: *std.Io.Reader,
-    buf: []u8,
-    reader_impl: ?ReaderImpl = null,
-    control_frame_writer: *std.Io.Writer,
-    control_frame_mask_strategy: ws.message.frame.MaskStrategy,
-    controlFrameHandler: ws.message.ControlFrameHeaderHandlerFn,
-    stream_error: ?StreamError = null,
+    control_frame_handler: ws.message.ControlFrameHandler,
+    state: State,
 
-    pub fn init(underlying_reader: *std.Io.Reader, mask_strategy: ws.message.frame.MaskStrategy, controlFrameHandler: ws.message.ControlFrameHeaderHandlerFn, control_frame_writer: *std.Io.Writer, buf: []u8) MessageReader {
+    pub fn init(reader: *std.Io.Reader, control_frame_handler: ws.message.ControlFrameHandler, buffer: []u8) MessageReader {
         return .{
-            .underlying_reader = underlying_reader,
-            .controlFrameHandler = controlFrameHandler,
-            .control_frame_mask_strategy = mask_strategy,
-            .control_frame_writer = control_frame_writer,
-            .buf = buf,
+            .interface = .{ .buffer = buffer, .seek = 0, .end = 0, .vtable = &.{ .stream = &streamFn } },
+            .underlying_reader = reader,
+            .control_frame_handler = control_frame_handler,
+            .state = .waiting_for_first_header,
         };
     }
 
-    // reads headers from reader
-    pub fn receiveHead(self: *MessageReader) ReadHeaderError!void {
-        const header = try readUntilDataFrameHeader(self.control_frame_mask_strategy, self.controlFrameHandler, self.underlying_reader, self.control_frame_writer);
-        if (header.asMostBasicHeader().opcode == .continuation) {
-            ws.log.err("continuation frame found as initial frame, which is not allowed", .{});
+    /// gets the header pertaining to this message
+    pub fn getHeader(self: *MessageReader) GetHeaderError!ws.message.frame.AnyFrameHeader {
+        return switch (self.state) {
+            .waiting_for_first_header => {
+                _ = self.streamHeader() catch |err| {
+                    self.state = .{ .err = err };
+                    return err;
+                };
+                return try self.getHeader();
+            },
+            .waiting_for_next_header => |s| s.first_header,
+            .reading_unfragmented_payload => |s| s.header,
+            .reading_fragmented_payload => |s| s.first_header,
+            .complete => error.NoLongerAvailable,
+            .err => error.NoLongerAvailable,
+        };
+    }
+
+    fn streamFn(r: *std.Io.Reader, w: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
+        const self: *MessageReader = @alignCast(@fieldParentPtr("interface", r));
+
+        return self.stream(w, limit) catch |err| {
+            if (err == error.EndOfFrame) {
+                self.state = .complete;
+                return error.EndOfStream;
+            }
+
+            self.state = .{ .err = err };
+            // an actual EndOfFrame is equivalent to ReadError's EndOfStream, but an EndOfStream is a ReadError with reason EndOfStream,
+            // since the stream should *never* end in the middle of a frame.
+            return switch (self.state.err) {
+                error.EndOfFrame => unreachable,
+                error.UnderlyingWriteFailed => error.WriteFailed,
+                else => error.ReadFailed,
+            };
+        };
+    }
+
+    fn stream(self: *MessageReader, w: *std.Io.Writer, limit: std.Io.Limit) Error!usize {
+        return switch (self.state) {
+            .waiting_for_first_header => try self.streamHeader(),
+            .waiting_for_next_header => try self.streamHeader(),
+            .reading_unfragmented_payload => try self.streamPayload(w, limit),
+            .reading_fragmented_payload => try self.streamPayloadFragmented(w, limit),
+            .complete => return error.EndOfFrame,
+            .err => |err| return err,
+        };
+    }
+
+    fn streamHeader(self: *MessageReader) Error!usize {
+        std.debug.assert(self.state == .waiting_for_first_header or self.state == .waiting_for_next_header);
+
+        const header = try readUntilDataFrameHeader(self.underlying_reader, self.control_frame_handler);
+        const basic_header = header.asMostBasicHeader();
+
+        // first header may never be a continuation header
+        if (self.state == .waiting_for_first_header and basic_header.opcode == .continuation) {
             return error.InvalidMessage;
         }
 
-        if (header.asMostBasicHeader().fin) {
-            self.reader_impl = .{ .unfragmented = .init(self.underlying_reader, header, self.buf) };
-        } else {
-            self.reader_impl = .{ .fragmented = .init(
-                self.underlying_reader,
-                self.control_frame_writer,
-                self.control_frame_mask_strategy,
-                self.controlFrameHandler,
-                header,
-                self.buf,
-            ) };
+        // subsequent fragmented headers must be continuation headers
+        if (self.state == .waiting_for_next_header and basic_header.opcode != .continuation) {
+            return error.InvalidMessage;
         }
-    }
 
-    pub fn reader(self: *MessageReader) *std.Io.Reader {
-        if (self.reader_impl) |*payload_reader| {
-            return switch (payload_reader.*) {
-                .unfragmented => |*unfragmented| &unfragmented.interface,
-                .fragmented => |*fragmented| &fragmented.interface,
+        if (basic_header.fin) {
+            self.state = switch (self.state) {
+                .waiting_for_first_header => .{ .reading_unfragmented_payload = .{
+                    .header = header,
+                    .bytes_read = 0,
+                    .prev_partial_codepoint_buf = undefined,
+                    .prev_partial_codepoint_len = 0,
+                } },
+                .waiting_for_next_header => |s| .{ .reading_fragmented_payload = .{
+                    .first_header = s.first_header,
+                    .header = header,
+                    .bytes_read = 0,
+                    .prev_partial_codepoint_buf = s.prev_partial_codepoint_buf,
+                    .prev_partial_codepoint_len = s.prev_partial_codepoint_len,
+                } },
+                else => unreachable,
             };
         } else {
-            std.debug.panic("payloadReader() must be called after `receiveHead`", .{});
-        }
-    }
-
-    // if a reader error is ever encountered, this is a surefire way to get a more specific error than `error.ReadFailed`
-    pub fn payloadReadError(self: *MessageReader) ?StreamError {
-        if (self.stream_error) |stream_error| {
-            return stream_error;
-        }
-        const reader_impl = self.reader_impl orelse return null;
-        return reader_impl.err();
-    }
-};
-
-pub const ReaderImpl = union(enum) {
-    unfragmented: UnfragmentedPayloadReader,
-    fragmented: FragmentedPayloadReader,
-
-    /// Returns error if this is called on a message that is either invalid, or a control frame.
-    pub fn getMessageType(self: ReaderImpl) ws.message.Type {
-        const opcode = switch (self) {
-            .fragmented => |frag| frag.first_header.asMostBasicHeader().opcode,
-            .unfragmented => |unfrag| unfrag.frame_header.asMostBasicHeader().opcode,
-        };
-        return ws.message.Type.fromOpcode(opcode) catch std.debug.panic("getMessageType called on control frame header", .{});
-    }
-
-    pub fn payloadLen(self: ReaderImpl) ?usize {
-        return switch (self) {
-            .fragmented => null,
-            .unfragmented => |unfrag| unfrag.frame_header.getPayloadLen() catch null,
-        };
-    }
-
-    pub fn err(self: ReaderImpl) ?StreamError {
-        return switch (self) {
-            .fragmented => |frag| switch (frag.state) {
-                .err => |errr| return errr,
-                else => return null,
-            },
-            .unfragmented => |unfrag| switch (unfrag.state) {
-                .err => |errr| return errr,
-                else => return null,
-            },
-        };
-    }
-};
-
-/// Represents an incoming message that may span multiple frames.
-pub const FragmentedPayloadReader = struct {
-    underlying_reader: *std.Io.Reader,
-    control_frame_writer: *std.Io.Writer,
-    control_frame_mask_strategy: ws.message.frame.MaskStrategy,
-    controlFrameHandler: ws.message.ControlFrameHeaderHandlerFn,
-    first_header: ws.message.frame.AnyFrameHeader,
-    state: State,
-    interface: std.Io.Reader,
-
-    pub fn init(
-        underlying_reader: *std.Io.Reader,
-        control_frame_writer: *std.Io.Writer,
-        control_frame_mask_strategy: ws.message.frame.MaskStrategy,
-        controlFrameHandler: ws.message.ControlFrameHeaderHandlerFn,
-        first_header: ws.message.frame.AnyFrameHeader,
-        buf: []u8,
-    ) FragmentedPayloadReader {
-        return FragmentedPayloadReader{
-            .underlying_reader = underlying_reader,
-            .control_frame_writer = control_frame_writer,
-            .control_frame_mask_strategy = control_frame_mask_strategy,
-            .controlFrameHandler = controlFrameHandler,
-            .first_header = first_header,
-            .state = .{ .in_payload = .{
-                .header = first_header,
-                .idx = 0,
-                .prev_partial_codepoint_buf = .{ 0, 0, 0 },
-                .prev_partial_codepoint_len = 0,
-            } },
-            .interface = .{ .buffer = buf, .seek = 0, .end = 0, .vtable = &.{ .stream = &streamFn } },
-        };
-    }
-
-    fn streamFn(reader: *std.Io.Reader, writer: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
-        const self: *FragmentedPayloadReader = @alignCast(@fieldParentPtr("interface", reader));
-        return self.stream(writer, limit) catch |err| {
-            self.state = .{ .err = err };
-            if (err == error.EndOfStream) {
-                return error.EndOfStream;
-            }
-            return error.ReadFailed;
-        };
-    }
-
-    fn stream(self: *FragmentedPayloadReader, writer: *std.Io.Writer, limit: std.Io.Limit) StreamError!usize {
-        switch (self.state) {
-            .waiting_for_next_header => |state| {
-                const header = try readUntilDataFrameHeader(self.control_frame_mask_strategy, self.controlFrameHandler, self.underlying_reader, self.control_frame_writer);
-                if (header.asMostBasicHeader().opcode != .continuation) {
-                    ws.log.err("frame type {} found while reading fragmented message, should be .continuation", .{header.asMostBasicHeader().opcode});
-                    return error.InvalidMessage;
-                }
-                self.state = .{
-                    .in_payload = .{
-                        .header = header,
-                        .idx = 0,
-                        .prev_partial_codepoint_buf = state.prev_partial_codepoint_buf,
-                        .prev_partial_codepoint_len = state.prev_partial_codepoint_len,
-                    },
-                };
-            },
-            .err => |err| return err,
-            .done => return error.EndOfStream,
-            .in_payload => {},
-        }
-
-        // we are now guaranteed to be in state `.in_payload`
-        const state = &self.state.in_payload;
-        const payload_len = state.header.getPayloadLen() catch {
-            return error.PayloadTooLong;
-        };
-        const remaining_bytes = payload_len - state.idx;
-        if (remaining_bytes == 0) {
-            return try handleEndOfFragment(&self.state);
-        }
-        var buf: [1000]u8 = undefined;
-        var buf_writer = std.Io.Writer.fixed(&buf);
-        const n = self.underlying_reader.stream(&buf_writer, limit.min(.limited(remaining_bytes)).min(.limited(buf.len))) catch |err| switch (err) {
-            error.EndOfStream => {
-                return try handleEndOfFragment(&self.state);
-            },
-            error.ReadFailed => {
-                ws.log.err("Error while reading payload of unfragmented message: {}", .{err});
-                return error.UnexpectedReadFailure;
-            },
-            error.WriteFailed => unreachable,
-        };
-
-        // if the opcode is .text, we need to validate that the read contains valid utf8 text
-        if (self.first_header.asMostBasicHeader().opcode == .text) {
-            var next_partial_codepoint_buf: [3]u8 = undefined;
-            var next_partial_codepoint = std.ArrayList(u8).initBuffer(&next_partial_codepoint_buf);
-            const prev_partial_codepoint = state.prev_partial_codepoint_buf[0..state.prev_partial_codepoint_len];
-            utf8_validator.utf8ValidateStream(prev_partial_codepoint, buf_writer.buffered(), &next_partial_codepoint) catch |err| {
-                ws.log.err("invalid utf8 encountered while decoding .text frame of fragmented message: utf8ValidateStream({x}, {x}) returned {}", .{ prev_partial_codepoint, buf_writer.buffered(), err });
-                return error.InvalidUtf8;
+            self.state = switch (self.state) {
+                .waiting_for_first_header => .{ .reading_fragmented_payload = .{
+                    .first_header = header,
+                    .header = header,
+                    .bytes_read = 0,
+                    .prev_partial_codepoint_buf = undefined,
+                    .prev_partial_codepoint_len = 0,
+                } },
+                .waiting_for_next_header => |s| .{ .reading_fragmented_payload = .{
+                    .first_header = s.first_header,
+                    .header = header,
+                    .bytes_read = 0,
+                    .prev_partial_codepoint_buf = s.prev_partial_codepoint_buf,
+                    .prev_partial_codepoint_len = s.prev_partial_codepoint_len,
+                } },
+                else => unreachable,
             };
         }
 
-        // masking
-        if (state.header.asMostBasicHeader().mask) {
-            const masking_key = state.header.getMaskingKey() orelse {
-                ws.log.err("invalid state: mask bit is set but header does not have a masking key", .{});
-                return error.InvalidMessage;
-            };
-            ws.message.mask_unmask(state.idx, masking_key, buf_writer.buffered());
-        }
-        state.idx += n;
-
-        try writer.writeAll(buf_writer.buffered());
-        return n;
-    }
-
-    fn handleEndOfFragment(state: *State) StreamError!usize {
-        if (state.in_payload.header.asMostBasicHeader().fin) {
-            if (state.in_payload.prev_partial_codepoint_len > 0) {
-                return error.InvalidUtf8;
-            }
-            state.* = .done;
-            return error.EndOfStream;
-        }
-        const prev_state = state.in_payload;
-        state.* = .{
-            .waiting_for_next_header = .{
-                .prev_partial_codepoint_len = prev_state.prev_partial_codepoint_len,
-                .prev_partial_codepoint_buf = prev_state.prev_partial_codepoint_buf,
-            },
-        };
         return 0;
     }
 
-    pub const State = union(enum) {
-        in_payload: struct {
-            header: ws.message.frame.AnyFrameHeader,
-            idx: usize,
-            prev_partial_codepoint_buf: [3]u8,
-            prev_partial_codepoint_len: u8,
-        },
-        waiting_for_next_header: struct {
-            prev_partial_codepoint_buf: [3]u8,
-            prev_partial_codepoint_len: u8,
-        },
-        err: StreamError,
-        done: void,
-    };
-};
+    fn streamPayloadFragmented(self: *MessageReader, w: *std.Io.Writer, limit: std.Io.Limit) Error!usize {
+        std.debug.assert(self.state == .reading_fragmented_payload);
 
-pub const UnfragmentedPayloadReader = struct {
-    underlying_reader: *std.Io.Reader,
-    frame_header: ws.message.frame.AnyFrameHeader,
-    state: State,
-    interface: std.Io.Reader,
-
-    pub fn init(underlying_reader: *std.Io.Reader, frame_header: ws.message.frame.AnyFrameHeader, buffer: []u8) UnfragmentedPayloadReader {
-        return .{
-            .underlying_reader = underlying_reader,
-            .frame_header = frame_header,
-            .state = .{
-                .ok = .{
-                    .payload_idx = 0,
-                    .prev_partial_codepoint_buf = .{ 0, 0, 0 },
-                    .prev_partial_codepoint_len = 0,
-                },
+        const prev_state = self.state.reading_fragmented_payload;
+        return self.streamPayload(w, limit) catch |err| switch (err) {
+            error.EndOfFrame => {
+                if (prev_state.header.asMostBasicHeader().fin) {
+                    self.state = .complete;
+                } else {
+                    self.state = .{ .waiting_for_next_header = .{
+                        .first_header = prev_state.first_header,
+                        .prev_partial_codepoint_buf = prev_state.prev_partial_codepoint_buf,
+                        .prev_partial_codepoint_len = prev_state.prev_partial_codepoint_len,
+                    } };
+                }
+                return 0;
             },
-            .interface = .{
-                .buffer = buffer,
-                .seek = 0,
-                .end = 0,
-                .vtable = &.{ .stream = &streamFn },
-            },
+            else => return err,
         };
     }
 
-    fn streamFn(interface: *std.Io.Reader, writer: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
-        const self: *UnfragmentedPayloadReader = @alignCast(@fieldParentPtr("interface", interface));
-        return self.stream(writer, limit) catch |err| {
-            switch (err) {
-                error.EndOfStream => return error.EndOfStream,
-                else => return error.ReadFailed,
-            }
-        };
-    }
+    fn streamPayload(self: *MessageReader, w: *std.Io.Writer, limit: std.Io.Limit) Error!usize {
+        std.debug.assert(self.state == .reading_unfragmented_payload or self.state == .reading_fragmented_payload);
 
-    fn stream(self: *UnfragmentedPayloadReader, writer: *std.Io.Writer, limit: std.Io.Limit) StreamPayloadError!usize {
-        const state = switch (self.state) {
-            .err => |err| return err,
-            .ok => |*ok| ok,
+        const header = switch (self.state) {
+            .reading_unfragmented_payload => |unfrag| unfrag.header,
+            .reading_fragmented_payload => |frag| frag.header,
+            else => unreachable,
+        };
+        const is_text = switch (self.state) {
+            .reading_unfragmented_payload => header.asMostBasicHeader().opcode == .text,
+            .reading_fragmented_payload => |frag| frag.first_header.asMostBasicHeader().opcode == .text,
+            else => unreachable,
+        };
+        const payload_len = header.getPayloadLen() catch return error.PayloadTooLong;
+        const bytes_read = switch (self.state) {
+            .reading_unfragmented_payload => |unfrag| unfrag.bytes_read,
+            .reading_fragmented_payload => |frag| frag.bytes_read,
+            else => unreachable,
+        };
+        const prev_partial_codepoint = switch (self.state) {
+            .reading_unfragmented_payload => |unfrag| unfrag.prev_partial_codepoint_buf[0..unfrag.prev_partial_codepoint_len],
+            .reading_fragmented_payload => |frag| frag.prev_partial_codepoint_buf[0..frag.prev_partial_codepoint_len],
+            else => unreachable,
+        };
+        const is_final_frame = switch (self.state) {
+            .reading_unfragmented_payload => true,
+            .reading_fragmented_payload => |frag| frag.header.asMostBasicHeader().fin,
+            else => unreachable,
         };
 
-        std.log.info("a", .{});
-        const payload_len = self.frame_header.getPayloadLen() catch {
-            return error.PayloadTooLong;
-        };
-
-        const remaining_payload = payload_len - state.payload_idx;
-        if (remaining_payload == 0) {
-            if (state.prev_partial_codepoint_len > 0) {
-                const prev_partial_codepoint = state.prev_partial_codepoint_buf[0..state.prev_partial_codepoint_len];
-                ws.log.err("payload ended in the middle of a utf8 byte sequence: {x}, expected {} more bytes", .{ prev_partial_codepoint, std.unicode.utf8ByteSequenceLength(prev_partial_codepoint[0]) catch unreachable });
+        const remaining_bytes = payload_len - bytes_read;
+        if (remaining_bytes == 0) {
+            if (prev_partial_codepoint.len > 0 and is_final_frame) {
+                ws.log.err("payload ended with incomplete utf8 character: {x}", .{prev_partial_codepoint});
                 return error.InvalidUtf8;
             }
-            return error.EndOfStream;
+            return error.EndOfFrame;
         }
+        const read_limit = limit.min(.limited(remaining_bytes));
 
-        std.log.info("b", .{});
-        var buf: [1000]u8 = undefined;
-        var buf_writer = std.Io.Writer.fixed(&buf);
-        const bytes_streamed = self.underlying_reader.stream(&buf_writer, limit.min(.limited(remaining_payload)).min(.limited(buf.len))) catch |err| switch (err) {
-            error.EndOfStream => {
-                if (state.prev_partial_codepoint_len > 0) {
-                    const prev_partial_codepoint = state.prev_partial_codepoint_buf[0..state.prev_partial_codepoint_len];
-                    ws.log.err("payload ended in the middle of a utf8 byte sequence: {x}, expected {} more bytes", .{ prev_partial_codepoint, std.unicode.utf8ByteSequenceLength(prev_partial_codepoint[0]) catch unreachable });
-                    return error.InvalidUtf8;
-                }
-                return error.EndOfStream;
-            },
-            error.ReadFailed => {
-                ws.log.err("Error while reading payload of unfragmented message: {}", .{err});
-                return error.UnexpectedReadFailure;
-            },
-            error.WriteFailed => unreachable,
+        var buf: [8000]u8 = undefined;
+        const readable = read_limit.slice(&buf);
+        const n = self.underlying_reader.readSliceShort(readable) catch {
+            return error.UnderlyingReadFailed;
         };
+        const partial_payload = readable[0..n];
 
-        std.log.info("c", .{});
-        // masking
-        if (self.frame_header.asMostBasicHeader().mask) {
-            const masking_key = self.frame_header.getMaskingKey() orelse {
-                ws.log.err("invalid state: mask bit is set but header does not have a masking key", .{});
+        // unmask payload
+        if (header.asMostBasicHeader().mask) {
+            const masking_key = header.getMaskingKey() orelse {
+                ws.log.err("invalid header: mask bit is set but header does not have a masking key", .{});
                 return error.InvalidMessage;
             };
-            ws.message.mask_unmask(state.payload_idx, masking_key, buf_writer.buffered());
+            ws.message.mask_unmask(bytes_read, masking_key, partial_payload);
         }
-        state.payload_idx += bytes_streamed;
 
-        std.log.info("d", .{});
-        if (self.frame_header.asMostBasicHeader().opcode == .text) {
-            var next_partial_codepoint_buf: [3]u8 = undefined;
+        // validate [end of last payload ++ beginning of this payload] are valid utf8
+        var next_partial_codepoint_buf: [3]u8 = undefined;
+        var next_partial_codepoint_len: usize = 0;
+        if (is_text) {
             var next_partial_codepoint = std.ArrayList(u8).initBuffer(&next_partial_codepoint_buf);
-            const prev_partial_codepoint = state.prev_partial_codepoint_buf[0..state.prev_partial_codepoint_len];
-            utf8_validator.utf8ValidateStream(prev_partial_codepoint, buf_writer.buffered(), &next_partial_codepoint) catch |err| {
-                ws.log.err("invalid utf8 encountered while decoding .text frame of unfragmented message: utf8ValidateStream({x}, {x}) returned {}", .{ prev_partial_codepoint, buf_writer.buffered(), err });
+            utf8_validator.utf8ValidateStream(prev_partial_codepoint, partial_payload, &next_partial_codepoint) catch |err| {
+                ws.log.err("invalid utf8 encountered while decoding .text frame of fragmented message: utf8ValidateStream({x},{x}) returned {}", .{ prev_partial_codepoint, partial_payload, err });
                 return error.InvalidUtf8;
             };
-            @memcpy(state.prev_partial_codepoint_buf[0..next_partial_codepoint.items.len], next_partial_codepoint.items);
-            state.prev_partial_codepoint_len = next_partial_codepoint.items.len;
+            next_partial_codepoint_len = next_partial_codepoint.items.len;
         }
 
-        std.log.info("e", .{});
-        // this recursion has max depth of 1 since the buffer already contains `bytes_streamed` bytes
-        try writer.writeAll(buf_writer.buffered());
-        return bytes_streamed;
+        self.state = switch (self.state) {
+            .reading_unfragmented_payload => |unfrag| .{ .reading_unfragmented_payload = .{
+                .header = unfrag.header,
+                .prev_partial_codepoint_buf = next_partial_codepoint_buf,
+                .prev_partial_codepoint_len = next_partial_codepoint_len,
+                .bytes_read = unfrag.bytes_read + partial_payload.len,
+            } },
+            .reading_fragmented_payload => |frag| .{ .reading_fragmented_payload = .{
+                .first_header = frag.first_header,
+                .header = frag.header,
+                .prev_partial_codepoint_buf = next_partial_codepoint_buf,
+                .prev_partial_codepoint_len = next_partial_codepoint_len,
+                .bytes_read = frag.bytes_read + partial_payload.len,
+            } },
+            else => unreachable,
+        };
+
+        w.writeAll(partial_payload) catch return error.UnderlyingWriteFailed;
+        return partial_payload.len;
     }
+    pub const Error = error{
+        InvalidMessage,
+        UnderlyingReadFailed,
+        UnderlyingWriteFailed,
+        UnderlyingControlFrameWriteFailed,
+        PayloadTooLong,
+        EndOfStream,
+        EndOfFrame,
+        InvalidUtf8,
+        ReceivedCloseFrame,
+    } || std.Io.Cancelable;
+
+    pub const GetHeaderError = error{NoLongerAvailable} || Error;
 
     pub const State = union(enum) {
-        ok: struct {
-            payload_idx: usize = 0,
+        waiting_for_first_header: void,
+        reading_unfragmented_payload: struct {
+            header: ws.message.frame.AnyFrameHeader,
+            prev_partial_codepoint_buf: [3]u8,
+            prev_partial_codepoint_len: usize,
+            bytes_read: usize,
+        },
+        reading_fragmented_payload: struct {
+            first_header: ws.message.frame.AnyFrameHeader,
+            header: ws.message.frame.AnyFrameHeader,
+            prev_partial_codepoint_buf: [3]u8,
+            prev_partial_codepoint_len: usize,
+            bytes_read: usize,
+        },
+        waiting_for_next_header: struct {
+            first_header: ws.message.frame.AnyFrameHeader,
             prev_partial_codepoint_buf: [3]u8,
             prev_partial_codepoint_len: usize,
         },
-        err: StreamPayloadError,
+        complete: void,
+        err: Error,
+
+        pub fn format(self: State, w: *std.Io.Writer) !void {
+            switch (self) {
+                .waiting_for_first_header => try w.print("(waiting_for_first_header)", .{}),
+                .reading_unfragmented_payload => |s| try w.print("(reading_fragmented_payload: read={}/{} codepoint='{x}')", .{ s.bytes_read, s.header.asMostBasicHeader().getPayloadLen(), s.prev_partial_codepoint_buf[0..s.prev_partial_codepoint_len] }),
+                .reading_fragmented_payload => |s| try w.print("(reading_fragmented_payload: read={}/{} codepoint='{x}')", .{ s.bytes_read, s.header.asMostBasicHeader().getPayloadLen(), s.prev_partial_codepoint_buf[0..s.prev_partial_codepoint_len] }),
+                .waiting_for_next_header => |s| try w.print("(waiting_for_next_header: codepoint='{x}')", .{s.prev_partial_codepoint_buf[0..s.prev_partial_codepoint_len]}),
+                .complete => try w.print("(complete)", .{}),
+                .err => |err| try w.print("(err: {})", .{err}),
+            }
+        }
     };
 };
 
-/// loops through messages until a non-control frame is found, calling controlFrameHandler on each control frame.
 fn readUntilDataFrameHeader(
-    control_frame_mask_strategy: ws.message.frame.MaskStrategy,
-    controlFrameHandler: ws.message.ControlFrameHeaderHandlerFn,
-    reader: *std.Io.Reader,
-    writer: *std.Io.Writer,
-) ReadHeaderError!ws.message.frame.AnyFrameHeader {
+    underlying_reader: *std.Io.Reader,
+    control_frame_handler: ws.message.ControlFrameHandler,
+) MessageReader.Error!ws.message.frame.AnyFrameHeader {
     while (true) {
-        const current_header = ws.message.frame.AnyFrameHeader.readFrom(reader) catch |err| return switch (err) {
+        const current_header = ws.message.frame.AnyFrameHeader.readFrom(underlying_reader) catch |err| return switch (err) {
             error.EndOfStream => error.EndOfStream,
             else => {
                 ws.log.err("error occurred while parsing header: {}", .{err});
@@ -409,20 +307,22 @@ fn readUntilDataFrameHeader(
                 },
             };
             if (!control_frame_header.fin) {
-                ws.log.err("peer gave us a control frame which is fragmented, which is not allowed", .{});
+                ws.log.err("peer sent a control frame which is fragmented, which is not allowed", .{});
                 return error.InvalidMessage;
             }
 
             var payload_buf: [125]u8 = undefined;
-            var payload_buf_writer = std.Io.Writer.fixed(&payload_buf);
-            reader.streamExact(&payload_buf_writer, control_frame_header.payload_len) catch |err| {
-                ws.log.err("Unexpected read failure when reading payload from control frame: {}", .{err});
-                return error.UnexpectedReadFailure;
+            const payload = payload_buf[0..control_frame_header.payload_len];
+            underlying_reader.readSliceAll(payload) catch |err| switch (err) {
+                error.ReadFailed => return error.UnderlyingReadFailed,
+                error.EndOfStream => return error.EndOfStream,
             };
 
-            controlFrameHandler(control_frame_mask_strategy, writer, control_frame_header, payload_buf_writer.buffered()) catch |err| return switch (err) {
-                error.ReceivedCloseFrame => |err_cast| err_cast,
-                error.WriteFailed => error.UnexpectedControlFrameResponseFailure,
+            control_frame_handler.handlerFn(&control_frame_handler, control_frame_header, payload) catch |err| return switch (err) {
+                error.ReceivedCloseFrame => error.ReceivedCloseFrame,
+                error.InvalidMessage => error.InvalidMessage,
+                error.Canceled => error.Canceled,
+                error.EndOfStream, error.EndOfFrame, error.UnderlyingWriteFailed, error.Overflow, error.WriteFailed => error.UnderlyingControlFrameWriteFailed,
             };
             continue;
         }
@@ -441,18 +341,13 @@ test "A single-frame unmasked text message" {
     const bytes = [_]u8{ 0x81, 0x05, 0x48, 0x65, 0x6c, 0x6c, 0x6f };
     var reader = std.Io.Reader.fixed(&bytes);
     var message_reader_buf: [100]u8 = undefined;
-    var writer_buf: [100]u8 = undefined;
-    var writer = std.Io.Writer.Discarding.init(&writer_buf);
-    var message_reader = MessageReader.init(
+    var message_reader: MessageReader = .init(
         &reader,
-        .unmasked,
-        &panic_control_frame_handler,
-        &writer.writer,
+        panic_control_frame_handler,
         &message_reader_buf,
     );
-    try message_reader.receiveHead();
     var output: [100]u8 = undefined;
-    const output_len = try message_reader.reader().readSliceShort(&output);
+    const output_len = try message_reader.interface.readSliceShort(&output);
 
     try std.testing.expectEqualStrings("Hello", output[0..output_len]);
 }
@@ -460,20 +355,15 @@ test "A single-frame unmasked text message" {
 // technically server-to-client messages should never be masked, but maybe one day MessageReader will be re-used to make a Websocket Server...
 test "A single-frame masked text message" {
     const bytes = [_]u8{ 0x81, 0x85, 0x37, 0xfa, 0x21, 0x3d, 0x7f, 0x9f, 0x4d, 0x51, 0x58 };
-    var writer_buf: [100]u8 = undefined;
     var message_reader_buf: [100]u8 = undefined;
     var reader = std.Io.Reader.fixed(&bytes);
-    var writer = std.Io.Writer.Discarding.init(&writer_buf);
-    var message_reader = MessageReader.init(
+    var message_reader: MessageReader = .init(
         &reader,
-        .unmasked,
-        &panic_control_frame_handler,
-        &writer.writer,
+        panic_control_frame_handler,
         &message_reader_buf,
     );
-    try message_reader.receiveHead();
     var output: [100]u8 = undefined;
-    const output_len = try message_reader.reader().readSliceShort(&output);
+    const output_len = try message_reader.interface.readSliceShort(&output);
 
     try std.testing.expectEqualStrings("Hello", output[0..output_len]);
 }
@@ -482,24 +372,19 @@ test "A fragmented unmasked text message" {
     const reader_buf = [_]u8{ 0x01, 0x03, 0x48, 0x65, 0x6c, 0x80, 0x02, 0x6c, 0x6f };
     var reader = std.Io.Reader.fixed(&reader_buf);
     var message_reader_buf: [100]u8 = undefined;
-    var writer_buf: [100]u8 = undefined;
-    var writer = std.Io.Writer.Discarding.init(&writer_buf);
-    var message_reader = MessageReader.init(
+    var message_reader: MessageReader = .init(
         &reader,
-        .unmasked,
-        &panic_control_frame_handler,
-        &writer.writer,
+        panic_control_frame_handler,
         &message_reader_buf,
     );
-    try message_reader.receiveHead();
     var output: [100]u8 = undefined;
-    const output_len = try message_reader.reader().readSliceShort(&output);
+    const output_len = try message_reader.interface.readSliceShort(&output);
 
     try std.testing.expectEqualStrings("Hello", output[0..output_len]);
 }
 
 test "a long unfragmented unmasked message" {
-    const header = ws.message.frame.AnyFrameHeader{ .u32_unmasked = .{
+    const header: ws.message.frame.AnyFrameHeader = .{ .u32_unmasked = .{
         .fin = true,
         .opcode = .text,
         .mask = false,
@@ -519,18 +404,13 @@ test "a long unfragmented unmasked message" {
 
     var reader = std.Io.Reader.fixed(full_message_writer.written());
     var message_reader_buf: [100]u8 = undefined;
-    var writer_buf: [100]u8 = undefined;
-    var writer = std.Io.Writer.Discarding.init(&writer_buf);
-    var message_reader = MessageReader.init(
+    var message_reader: MessageReader = .init(
         &reader,
-        .unmasked,
-        &panic_control_frame_handler,
-        &writer.writer,
+        panic_control_frame_handler,
         &message_reader_buf,
     );
-    try message_reader.receiveHead();
     var output: [10_000]u8 = undefined;
-    const output_len = try message_reader.reader().readSliceShort(&output);
+    const output_len = try message_reader.interface.readSliceShort(&output);
 
     try std.testing.expectEqualSlices(u8, &payload, output[0..output_len]);
 }
@@ -550,23 +430,28 @@ test "(not in spec) A fragmented unmasked text message interrupted with a contro
     var writer = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer writer.deinit();
 
+    const control_frame_handler: ws.message.ControlFrameHandler = .default(.{ .fixed = 0x37FA213D }, &writer.writer);
+
     var message_reader_buf: [1000]u8 = undefined;
-    var message_reader = MessageReader.init(
+    var message_reader: MessageReader = .init(
         &reader,
-        .{ .fixed = 0x37FA213D },
-        &ws.message.defaultControlFrameHandler,
-        &writer.writer,
+        control_frame_handler,
         &message_reader_buf,
     );
-    try message_reader.receiveHead();
 
     var output: [100]u8 = undefined;
-    const output_len = try message_reader.reader().readSliceShort(&output);
+    const output_len = try message_reader.interface.readSliceShort(&output);
 
     try std.testing.expectEqualStrings("Hello", output[0..output_len]);
     try std.testing.expectEqualSlices(u8, &.{ 0x8a, 0x85, 0x37, 0xfa, 0x21, 0x3d, 0x7f, 0x9f, 0x4d, 0x51, 0x58 }, writer.written());
 }
 
-fn panic_control_frame_handler(_: ws.message.frame.MaskStrategy, _: *std.Io.Writer, _: ws.message.frame.FrameHeader(.u16, false), _: []const u8) ws.message.ControlFrameHandlerError!void {
+const panic_control_frame_handler: ws.message.ControlFrameHandler = .{
+    .conn_writer = undefined,
+    .mask_strategy = undefined,
+    .handlerFn = panicControlFrameHandlerFn,
+};
+
+fn panicControlFrameHandlerFn(_: *const ws.message.ControlFrameHandler, _: ws.message.frame.FrameHeader(.u16, false), _: []const u8) ws.message.ControlFrameHandler.Error!void {
     @panic("nooo");
 }

@@ -7,6 +7,7 @@ pub const message = @import("./message.zig");
 pub const Connection = client.Connection;
 pub const Client = client.Client;
 pub const MessageReader = message.MessageReader;
+
 pub const SingleFrameMessageWriter = message.SingleFrameMessageWriter;
 pub const MultiFrameMessageWriter = message.MultiFrameMessageWriter;
 
