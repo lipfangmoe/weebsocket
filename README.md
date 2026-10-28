@@ -1,4 +1,4 @@
-# weebsocket (WIP, not functional)
+# weebsocket
 
 Zig Websocket Client (maybe Server one day). Does not implement any WebSocket extensions at the moment.
 
