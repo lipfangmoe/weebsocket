@@ -56,18 +56,21 @@ pub fn handshake(
         if (std.mem.eql(u8, header.name, "Upgrade")) {
             upgrade_seen = true;
             if (!std.ascii.eqlIgnoreCase(header.value, "websocket")) {
+                std.log.err("Server did not respond with the correct 'Upgrade' header. Expected 'websocket', found '{s}'", .{header.value});
                 return error.NotWebsocketServer;
             }
         }
         if (std.mem.eql(u8, header.name, "Connection")) {
             connection_seen = true;
             if (!std.mem.eql(u8, header.value, "Upgrade")) {
+                std.log.err("Server did not respond with the correct 'Connection' header. Expected 'Upgrade', found '{s}'", .{header.value});
                 return error.NotWebsocketServer;
             }
         }
         if (std.mem.eql(u8, header.name, "Sec-WebSocket-Accept")) {
             accept_seen = true;
             if (!std.mem.eql(u8, header.value, &expected_ws_accept)) {
+                std.log.err("Server did not respond with the correct 'Sec-WebSocket-Accept' header. Expected '{s}', found '{s}'", .{ &expected_ws_accept, header.value });
                 return error.NotWebsocketServer;
             }
         }
