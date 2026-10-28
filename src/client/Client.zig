@@ -109,7 +109,7 @@ pub fn handshake(
         return error.NotWebsocketServer;
     }
 
-    return client.Connection.init(req, self.rng.interface());
+    return client.Connection.init(req, self.rng);
 }
 
 pub fn deinit(self: *Client) void {
