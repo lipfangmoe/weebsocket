@@ -47,6 +47,11 @@ pub fn deinitAndFlush(self: *Connection, payload: ?ClosePayload) FlushMessagesAf
             self.forceDeinit();
             return FlushMessagesAfterCloseIterator{ .conn = null };
         };
+        message_writer.interface.flush() catch |err| {
+            ws.log.err("error occurred while writing close reason: {}", .{err});
+            self.forceDeinit();
+            return FlushMessagesAfterCloseIterator{ .conn = null };
+        };
     } else {
         ws.log.debug("deinitAndFlush(null)", .{});
         var buf: [200]u8 = undefined;
@@ -96,6 +101,7 @@ pub fn ping(self: *Connection, payload: ?[]u8) !void {
     var buf: [200]u8 = undefined;
     var message_writer = try ws.message.SingleFrameMessageWriter.initControl(self.writer(), payload_nn.len, .ping, .random_mask, &buf);
     try message_writer.interface.writeAll(payload_nn);
+    try message_writer.interface.flush();
 }
 
 pub const ReceiveMessageError = error{

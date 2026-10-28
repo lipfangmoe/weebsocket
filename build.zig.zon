@@ -1,6 +1,6 @@
 .{
     .name = .weebsocket,
-    .version = "0.3.3",
+    .version = "0.3.4",
     .minimum_zig_version = "0.15.2",
     .fingerprint = 0xd1ee0877b7793a31,
 
