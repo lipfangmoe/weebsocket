@@ -133,7 +133,8 @@ pub fn printMessage(self: *Connection, msg_type: ws.message.Type, comptime fmt: 
 
 /// Writes a message.
 pub fn sendMessage(self: *Connection, msg_type: ws.message.Type, message: []const u8) SendMessageError!void {
-    var message_writer = try self.writeMessageStream(msg_type, message.len);
+    var buf: [8000]u8 = undefined;
+    var message_writer = try self.writeMessageStream(msg_type, &buf, message.len);
     message_writer.interface.writeAll(message) catch |err| {
         ws.log.err("internal error: {}", .{err});
         return error.WriteFailed;
@@ -145,12 +146,11 @@ pub fn sendMessage(self: *Connection, msg_type: ws.message.Type, message: []cons
 }
 
 /// Writes a stream of bytes as a websocket message.
-pub fn writeMessageStream(self: *Connection, msg_type: ws.message.Type, length: usize) SendMessageError!ws.message.SingleFrameMessageWriter {
+pub fn writeMessageStream(self: *Connection, msg_type: ws.message.Type, buf: []u8, message_length: usize) SendMessageError!ws.message.SingleFrameMessageWriter {
     if (self.self_closing) {
         std.debug.panic("Trying to write message after closing self", .{});
     }
-    var buf: [8000]u8 = undefined;
-    return try ws.MessageWriter.init(self.writer(), length, msg_type, .random_mask, &buf);
+    return try ws.MessageWriter.init(self.writer(), message_length, msg_type, .random_mask, buf);
 }
 
 /// Creates a MessageWriter, which writes a Websocket Frame Header, and then
