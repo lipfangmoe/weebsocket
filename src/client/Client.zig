@@ -53,21 +53,21 @@ pub fn handshake(
     var accept_seen = false;
     var headers_iter = req.response.iterateHeaders();
     while (headers_iter.next()) |header| {
-        if (std.mem.eql(u8, header.name, "Upgrade")) {
+        if (std.ascii.eqlIgnoreCase(header.name, "Upgrade")) {
             upgrade_seen = true;
             if (!std.ascii.eqlIgnoreCase(header.value, "websocket")) {
                 std.log.err("Server did not respond with the correct 'Upgrade' header. Expected 'websocket' (not case-sensitive), found '{s}'", .{header.value});
                 return error.NotWebsocketServer;
             }
         }
-        if (std.mem.eql(u8, header.name, "Connection")) {
+        if (std.ascii.eqlIgnoreCase(header.name, "Connection")) {
             connection_seen = true;
             if (!std.ascii.eqlIgnoreCase(header.value, "upgrade")) {
                 std.log.err("Server did not respond with the correct 'Connection' header. Expected 'upgrade' (not case-sensitive), found '{s}'", .{header.value});
                 return error.NotWebsocketServer;
             }
         }
-        if (std.mem.eql(u8, header.name, "Sec-WebSocket-Accept")) {
+        if (std.ascii.eqlIgnoreCase(header.name, "Sec-WebSocket-Accept")) {
             accept_seen = true;
             if (!std.mem.eql(u8, header.value, &expected_ws_accept)) {
                 std.log.err("Server did not respond with the correct 'Sec-WebSocket-Accept' header. Expected '{s}', found '{s}'", .{ &expected_ws_accept, header.value });
@@ -75,7 +75,16 @@ pub fn handshake(
             }
         }
     }
-    if (!upgrade_seen or !connection_seen or !accept_seen) {
+    if (!upgrade_seen) {
+        std.log.err("Server did not respond with an 'Upgrade' header.", .{});
+        return error.NotWebsocketServer;
+    }
+    if (!connection_seen) {
+        std.log.err("Server did not respond with an 'Connection' header.", .{});
+        return error.NotWebsocketServer;
+    }
+    if (!accept_seen) {
+        std.log.err("Server did not respond with an 'Upgrade' header.", .{});
         return error.NotWebsocketServer;
     }
 
