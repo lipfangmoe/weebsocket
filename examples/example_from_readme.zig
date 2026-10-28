@@ -7,10 +7,11 @@ pub fn main(init: std.process.Init) !void {
 
     const uri = std.Uri.parse("wss://example.com/") catch unreachable;
     var connection = try client.handshake(uri, null);
-    defer connection.deinit(null);
+    defer connection.deinit(init.io, null);
 
     while (true) {
-        var message = try connection.receiveMessage();
+        var reader_buf: [1000]u8 = undefined;
+        var message = try connection.receiveMessage(&reader_buf);
         const payload_reader = message.reader();
         const payload = try payload_reader.allocRemaining(init.gpa, .limited(10_000_000));
         defer init.gpa.free(payload);
@@ -26,8 +27,8 @@ pub fn main(init: std.process.Init) !void {
             try connection.printMessage(.text, "{f}", .{std.json.fmt(data, .{})});
 
             // example 3: low-level control
-            var buf: [1000]u8 = undefined;
-            var payload_writer = connection.createMessageStreamUnknownLength(.text, &buf);
+            var writer_buf: [1000]u8 = undefined;
+            var payload_writer = connection.createMessageStreamUnknownLength(.text, &writer_buf);
             try std.json.Stringify.value(data, .{}, &payload_writer.interface);
             try payload_writer.interface.flush();
         }
