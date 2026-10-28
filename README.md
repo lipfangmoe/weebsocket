@@ -1,4 +1,4 @@
-# dweebsocket
+# weebsocket
 
 Zig Websocket Client (maybe Server one day)
 
@@ -9,3 +9,7 @@ To add this to your project, use the Zig Package Manager:
 ```bash
 zig fetch --save 'https://github.com/deanveloper/dweebsocket/archive/main.tgz' # todo - change to use tagged versions
 ```
+
+## Usage
+
+TODO
