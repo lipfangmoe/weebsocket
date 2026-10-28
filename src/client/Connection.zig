@@ -19,7 +19,7 @@ pub fn init(http_request: std.http.Client.Request) Connection {
 /// Sends a close request to the server, and returns an iterator of the remaining messages that the server sends.
 ///
 /// Note: if including a payload, the first two bytes MUST be a status found in TerminationStatus.
-pub fn closeAndFlush(self: *Connection, payload: ?std.BoundedArray(u8, 125)) !FlushMessagesAfterCloseIterator {
+pub fn deinitAndFlush(self: *Connection, payload: ?std.BoundedArray(u8, 125)) !FlushMessagesAfterCloseIterator {
     const payload_nn = payload orelse std.BoundedArray(u8, 125){};
     const conn_writer = self.http_request.writer();
     var message_writer = ws.message.AnyMessageWriter.initControl(conn_writer.any(), payload_nn.len, .close, .random_mask);
@@ -31,9 +31,9 @@ pub fn closeAndFlush(self: *Connection, payload: ?std.BoundedArray(u8, 125)) !Fl
 }
 
 /// Sends a close request to the server, and waits for a close response. `payload` is an optional byte sequence to send to the server.
-pub fn close(self: *Connection, payload: ?std.BoundedArray(u8, 125)) void {
-    var iterator = closeAndFlush(self, payload) catch {
-        self.deinit_force();
+pub fn deinit(self: *Connection, payload: ?std.BoundedArray(u8, 125)) void {
+    var iterator = deinitAndFlush(self, payload) catch {
+        self.forceDeinit();
         return;
     };
 
@@ -41,13 +41,13 @@ pub fn close(self: *Connection, payload: ?std.BoundedArray(u8, 125)) void {
     while (true) {
         _ = iterator.next() catch break orelse break;
     }
-    self.deinit_force();
+    self.forceDeinit();
 }
 
-/// It is highly recommended to call `close()` instead, but this function allows to
+/// It is highly recommended to call `close()` instead, but this function allows to terminate the HTTP connection immediately.
 ///
 /// Frees all resources related to this connection, immediately closing the HTTP connection.
-pub fn deinit_force(self: *Connection) void {
+pub fn forceDeinit(self: *Connection) void {
     self.closing = true;
     self.http_request.deinit();
 }

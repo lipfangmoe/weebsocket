@@ -31,9 +31,9 @@ pub const AnyMessageReader = union(enum) {
         }
     }
 
-    pub fn payload_reader(self: *AnyMessageReader) std.io.AnyReader {
+    pub fn payloadReader(self: *AnyMessageReader) std.io.AnyReader {
         return switch (self.*) {
-            inline else => |*impl| impl.payload_reader(),
+            inline else => |*impl| impl.payloadReader(),
         };
     }
 };
@@ -85,7 +85,7 @@ pub const FragmentedMessageReader = struct {
         return read(self, bytes);
     }
 
-    pub fn payload_reader(self: *FragmentedMessageReader) std.io.AnyReader {
+    pub fn payloadReader(self: *FragmentedMessageReader) std.io.AnyReader {
         return std.io.AnyReader{ .context = self, .readFn = typeErasedReadFn };
     }
 
@@ -120,7 +120,7 @@ pub const UnfragmentedMessageReader = struct {
         return read(self, bytes);
     }
 
-    pub fn payload_reader(self: *UnfragmentedMessageReader) std.io.AnyReader {
+    pub fn payloadReader(self: *UnfragmentedMessageReader) std.io.AnyReader {
         return std.io.AnyReader{ .context = self, .readFn = typeErasedReadFn };
     }
 };
@@ -169,7 +169,7 @@ test "A single-frame unmasked text message" {
         &panic_control_frame_handler,
         std.io.null_writer.any(),
     );
-    var payload_reader = message.payload_reader();
+    var payload_reader = message.payloadReader();
     const output = try payload_reader.readBoundedBytes(100);
 
     try std.testing.expectEqualStrings("Hello", output.constSlice());
@@ -184,7 +184,7 @@ test "A single-frame masked text message" {
         &panic_control_frame_handler,
         std.io.null_writer.any(),
     );
-    var payload_reader = message.payload_reader();
+    var payload_reader = message.payloadReader();
     const output = try payload_reader.readBoundedBytes(100);
 
     try std.testing.expectEqualStrings("Hello", output.constSlice());
@@ -198,7 +198,7 @@ test "A fragmented unmasked text message" {
         &panic_control_frame_handler,
         std.io.null_writer.any(),
     );
-    var payload_reader = message.payload_reader();
+    var payload_reader = message.payloadReader();
     const output = try payload_reader.readBoundedBytes(100);
 
     try std.testing.expectEqualStrings("Hello", output.constSlice());
@@ -223,7 +223,7 @@ test "(not in spec) A fragmented unmasked text message interrupted with a contro
         &ws.message.controlFrameHandlerWithMask(.{ .fixed_mask = 0x37FA213D }),
         outgoing_stream.writer().any(),
     );
-    var payload_reader = message.payload_reader();
+    var payload_reader = message.payloadReader();
     const output = try payload_reader.readBoundedBytes(1000);
 
     try std.testing.expectEqualStrings("Hello", output.constSlice());
