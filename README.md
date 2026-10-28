@@ -21,7 +21,7 @@ zig fetch --save 'https://github.com/deanveloper/weebsocket/archive/refs/tags/v0
 
 ```rust
 const std = @import("std");
-const ws = @import("./root.zig");
+const ws = @import("weebsocket");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};

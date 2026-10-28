@@ -3,7 +3,8 @@
 //! If you have an existing `std.http.Client`, it is okay to create this struct via struct initialization.
 
 const std = @import("std");
-const client = @import("../root.zig").client;
+const ws = @import("../root.zig");
+const client = ws.client;
 const b64_encoder = std.base64.standard.Encoder;
 
 http_client: std.http.Client,
@@ -45,7 +46,7 @@ pub fn handshake(
     try req.wait();
 
     if (req.response.status != .switching_protocols) {
-        std.log.err("expected status 101 SWITCHING PROTOCOLS, got {d} {s}", .{ @intFromEnum(req.response.status), req.response.status.phrase() orelse "{unknown}" });
+        ws.log.err("expected status 101 SWITCHING PROTOCOLS, got {d} {s}", .{ @intFromEnum(req.response.status), req.response.status.phrase() orelse "{unknown}" });
         return error.NotWebsocketServer;
     }
 
@@ -58,35 +59,35 @@ pub fn handshake(
         if (std.ascii.eqlIgnoreCase(header.name, "Upgrade")) {
             upgrade_seen = true;
             if (!std.ascii.eqlIgnoreCase(header.value, "websocket")) {
-                std.log.err("Server did not respond with the correct 'Upgrade' header. Expected 'websocket' (not case-sensitive), found '{s}'", .{header.value});
+                ws.log.err("Server did not respond with the correct 'Upgrade' header. Expected 'websocket' (not case-sensitive), found '{s}'", .{header.value});
                 return error.NotWebsocketServer;
             }
         }
         if (std.ascii.eqlIgnoreCase(header.name, "Connection")) {
             connection_seen = true;
             if (!std.ascii.eqlIgnoreCase(header.value, "upgrade")) {
-                std.log.err("Server did not respond with the correct 'Connection' header. Expected 'upgrade' (not case-sensitive), found '{s}'", .{header.value});
+                ws.log.err("Server did not respond with the correct 'Connection' header. Expected 'upgrade' (not case-sensitive), found '{s}'", .{header.value});
                 return error.NotWebsocketServer;
             }
         }
         if (std.ascii.eqlIgnoreCase(header.name, "Sec-WebSocket-Accept")) {
             accept_seen = true;
             if (!std.mem.eql(u8, header.value, &expected_ws_accept)) {
-                std.log.err("Server did not respond with the correct 'Sec-WebSocket-Accept' header. Expected '{s}', found '{s}'", .{ &expected_ws_accept, header.value });
+                ws.log.err("Server did not respond with the correct 'Sec-WebSocket-Accept' header. Expected '{s}', found '{s}'", .{ &expected_ws_accept, header.value });
                 return error.NotWebsocketServer;
             }
         }
     }
     if (!upgrade_seen) {
-        std.log.err("Server did not respond with an 'Upgrade' header.", .{});
+        ws.log.err("Server did not respond with an 'Upgrade' header.", .{});
         return error.NotWebsocketServer;
     }
     if (!connection_seen) {
-        std.log.err("Server did not respond with an 'Connection' header.", .{});
+        ws.log.err("Server did not respond with an 'Connection' header.", .{});
         return error.NotWebsocketServer;
     }
     if (!accept_seen) {
-        std.log.err("Server did not respond with an 'Upgrade' header.", .{});
+        ws.log.err("Server did not respond with an 'Upgrade' header.", .{});
         return error.NotWebsocketServer;
     }
 
