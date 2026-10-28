@@ -21,33 +21,34 @@ zig fetch --save 'https://github.com/deanveloper/weebsocket/archive/refs/tags/v0
 
 ```rust
 const std = @import("std");
-const ws = @import("weebsocket");
+const ws = @import("./root.zig");
 
 pub fn main() !void {
-	var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-	defer gpa.deinit();
-	var client = ws.Client(gpa.allocator());
-	defer client.deinit();
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer gpa.deinit();
+    var client = ws.Client.init(gpa.allocator());
+    defer client.deinit();
 
-	const uri = std.Uri.parse("wss://example.com/") catch unreachable;
-	var connection = client.handshake(uri, null);
-	defer connection.deinit(null);
-	
-	while (connection.readMessage()) |message| {
-		const payload_reader = message.payloadReader();
-		const payload = try payload_reader.readAllAlloc(gpa.allocator());
-		defer gpa.allocator().free(payload);
-		if (std.mem.eql(u8, payload.constSlice(), "foobar")) {
-			try connection.writeMessageString("got your message!");
+    const uri = std.Uri.parse("wss://example.com/") catch unreachable;
+    var connection = try client.handshake(uri, null);
+    defer connection.deinit(null);
 
-			const Data = struct { int: u32, string: []const u8 };
-			var payload_writer = try connection.writeMessageStreamUnknownLength(.text);
-			var buffered_writer = std.io.bufferedWriter(payload_writer.writer());
-			try std.json.stringify(buffered_writer.writer(), Data{ .int = 5, .string = "some value" }, .{});
-		}
-	} else |err| {
-		return err;
-	}
+    while (connection.readMessage()) |message| {
+        const payload_reader = message.payloadReader();
+        const payload = try payload_reader.readAllAlloc(gpa.allocator(), 10_000_000);
+        defer gpa.allocator().free(payload);
+        if (std.mem.eql(u8, payload.constSlice(), "foobar")) {
+            try connection.writeMessageString("got your message!");
+
+            const Data = struct { int: u32, string: []const u8 };
+            var payload_writer = try connection.writeMessageStreamUnknownLength(.text);
+            var buffered_writer = std.io.bufferedWriter(payload_writer.writer());
+            try std.json.stringify(buffered_writer.writer(), Data{ .int = 5, .string = "some value" }, .{});
+            try buffered_writer.flush();
+        }
+    } else |err| {
+        return err;
+    }
 }
 ```
 
