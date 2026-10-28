@@ -392,7 +392,7 @@ test "a long unfragmented unmasked message" {
         .rsv2 = false,
         .rsv3 = false,
     } };
-    const payload: [10_000]u8 = .{42} ** 10_000;
+    const payload: [10_000]u8 = @splat(42);
 
     var full_message_writer = std.Io.Writer.Allocating.init(std.testing.allocator);
     try header.writeTo(&full_message_writer.writer);
