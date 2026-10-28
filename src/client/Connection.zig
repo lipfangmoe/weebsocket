@@ -297,6 +297,7 @@ fn fmtCompactFn(data: []const u8, comptime _: []const u8, _: std.fmt.FormatOptio
     }
     if (std.unicode.utf8ValidateSlice(data)) {
         try fmt_writer.print("{s}", .{data});
+        return;
     }
 
     var char_count: usize = 1;
