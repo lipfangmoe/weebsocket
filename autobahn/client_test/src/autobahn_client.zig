@@ -9,7 +9,7 @@ pub fn main() !void {
     defer _ = gpa.deinit();
 
     // wait 5 seconds for autobanh server to be up
-    std.time.sleep(5 * std.time.ns_per_s);
+    std.Thread.sleep(5 * std.time.ns_per_s);
 
     defer updateReport(allocator) catch unreachable;
 
@@ -44,7 +44,7 @@ pub fn main() !void {
 
 const EchoError = error{ Expected, Unexpected };
 fn echo(connection: *ws.Connection) !void {
-    var message = connection.readMessage() catch |err| return switch (err) {
+    var message = connection.receiveMessage() catch |err| return switch (err) {
         error.Unknown => error.Unexpected,
         else => {
             std.log.info("error reading message header: {}", .{err});
@@ -55,8 +55,8 @@ fn echo(connection: *ws.Connection) !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
 
-    const max_payload_len = message.payloadLen() orelse 100_000_000;
-    const payload = message.payloadReader().readAllAlloc(arena.allocator(), max_payload_len) catch |err| return switch (err) {
+    const max_payload_len = message.reader_impl.?.payloadLen() orelse 100_000_000;
+    const payload = message.reader().readAlloc(arena.allocator(), max_payload_len) catch |err| return switch (message.stream_error.?) {
         error.UnexpectedReadFailure, error.UnexpectedControlFrameResponseFailure => error.Unexpected,
         else => {
             std.log.info("error writing message header: {}", .{err});
@@ -64,8 +64,8 @@ fn echo(connection: *ws.Connection) !void {
         },
     };
 
-    connection.writeMessage(message.getMessageType(), payload) catch |err| return switch (err) {
-        error.Unknown => error.Unexpected,
+    connection.sendMessage(message.reader_impl.?.getMessageType(), payload) catch |err| return switch (err) {
+        error.WriteFailed => error.Unexpected,
         else => {
             std.log.info("error writing message header: {}", .{err});
             return error.Expected;

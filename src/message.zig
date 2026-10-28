@@ -5,14 +5,13 @@ pub const frame = @import("./message/frame.zig");
 pub const reader = @import("./message/reader.zig");
 pub const writer = @import("./message/writer.zig");
 
-pub const AnyMessageReader = reader.AnyMessageReader;
-pub const AnyMessageWriter = writer.AnyMessageWriter;
+pub const MessageReader = reader.MessageReader;
+pub const SingleFrameMessageReader = reader.UnfragmentedPayloadReader;
+pub const MultiFrameMessageReader = reader.FragmentedPayloadReader;
 
-pub const SingleFrameMessageWriter = writer.SingleFrameMessageWriter;
-pub const MultiFrameMessageWriter = writer.MultiFrameMessageWriter;
-
-pub const SingleFrameMessageReader = reader.UnfragmentedMessageReader;
-pub const MultiFrameMessageReader = reader.FragmentedMessageReader;
+pub const MessageWriter = writer.MessageWriter;
+pub const SingleFrameMessageWriter = writer.UnfragmentedPayloadWriter;
+pub const MultiFrameMessageWriter = writer.FragmentedMessageWriter;
 
 pub const Type = enum {
     /// Indicates that the message is a valid UTF-8 string.
@@ -36,12 +35,12 @@ pub const Type = enum {
         };
     }
 };
-pub const ControlFrameHandlerError = error{ ReceivedCloseFrame, UnexpectedWriteFailure, EndOfStream };
+pub const ControlFrameHandlerError = error{ ReceivedCloseFrame, WriteFailed };
 pub const ControlFrameHeaderHandlerFn = *const ControlFrameHeaderHandlerFnBody;
 pub const ControlFrameHeaderHandlerFnBody = fn (
-    conn_writer: std.io.AnyWriter,
+    conn_writer: *std.Io.Writer,
     header: frame.FrameHeader(.u16, false),
-    payload: std.BoundedArray(u8, 125),
+    payload: []const u8,
 ) ControlFrameHandlerError!void;
 
 pub const defaultControlFrameHandler: ControlFrameHeaderHandlerFnBody = controlFrameHandlerWithMask(.random_mask);
@@ -49,34 +48,32 @@ pub const defaultControlFrameHandler: ControlFrameHeaderHandlerFnBody = controlF
 pub fn controlFrameHandlerWithMask(comptime mask: ws.message.frame.Mask) ControlFrameHeaderHandlerFnBody {
     const Struct = struct {
         pub fn handler(
-            conn_writer: std.io.AnyWriter,
+            conn_writer: *std.Io.Writer,
             frame_header: frame.FrameHeader(.u16, false),
-            payload: std.BoundedArray(u8, 125),
+            payload: []const u8,
         ) ControlFrameHandlerError!void {
             const opcode: frame.Opcode = frame_header.opcode;
             std.debug.assert(opcode.isControlFrame());
 
             switch (opcode) {
                 .ping => {
-                    var control_message_writer = ws.message.AnyMessageWriter.initControl(conn_writer, frame_header.payload_len, .pong, mask) catch |err| return switch (err) {
-                        error.EndOfStream => error.EndOfStream,
-                        else => {
-                            ws.log.err("Error while writing pong header: {}", .{err});
-                            return error.UnexpectedWriteFailure;
-                        },
+                    var buf: [1000]u8 = undefined;
+                    var control_message_writer = SingleFrameMessageWriter.initControl(conn_writer, frame_header.payload_len, .pong, mask, &buf) catch |err| {
+                        ws.log.err("Error while writing pong header: {}", .{err});
+                        return error.WriteFailed;
                     };
-                    const payload_writer = control_message_writer.payloadWriter();
-                    payload_writer.writeAll(payload.constSlice()) catch |err| return switch (err) {
-                        error.EndOfStream => error.EndOfStream,
-                        else => {
-                            ws.log.err("Error while writing pong payload: {}", .{err});
-                            return error.UnexpectedWriteFailure;
-                        },
+                    control_message_writer.interface.writeAll(payload) catch |err| {
+                        ws.log.err("Error while writing pong payload: {}", .{err});
+                        return error.WriteFailed;
+                    };
+                    control_message_writer.interface.flush() catch |err| {
+                        ws.log.err("Error while writing pong payload: {}", .{err});
+                        return error.WriteFailed;
                     };
                 },
                 .pong => {},
                 .close => {
-                    ws.log.debug("peer sent close frame with payload '{s}'", .{payload.constSlice()});
+                    ws.log.debug("peer sent close frame with payload '{s}'", .{payload});
                     return error.ReceivedCloseFrame;
                 },
                 else => unreachable,
@@ -84,4 +81,12 @@ pub fn controlFrameHandlerWithMask(comptime mask: ws.message.frame.Mask) Control
         }
     };
     return Struct.handler;
+}
+
+/// toggles the bytes between masked/unmasked form.
+pub fn mask_unmask(payload_start: usize, masking_key: [4]u8, bytes: []u8) void {
+    for (payload_start.., bytes) |payload_idx, *transformed_octet| {
+        const original_octet = transformed_octet.* ^ masking_key[payload_idx % 4];
+        transformed_octet.* = original_octet;
+    }
 }
