@@ -4,7 +4,6 @@
 
 const std = @import("std");
 const client = @import("../root.zig").client;
-
 const b64_encoder = std.base64.standard.Encoder;
 
 http_client: std.http.Client,
@@ -16,19 +15,28 @@ pub fn init(allocator: std.mem.Allocator) !Client {
     return .{ .http_client = http_client };
 }
 
-pub fn handshake(self: *Client, uri: std.Uri) !void {
+pub fn handshake(
+    self: *Client,
+    uri: std.Uri,
+    extra_headers: []const std.http.Header,
+) !client.Connection {
     var buf: [1000]u8 = undefined;
     const websocket_key = generateRandomWebsocketKey();
 
+    var headers = std.BoundedArray(std.http.Header, 100){};
+    headers.append(std.http.Header{ .name = "Upgrade", .value = "websocket" }) catch unreachable;
+    headers.append(std.http.Header{ .name = "Sec-WebSocket-Key", .value = &websocket_key }) catch unreachable;
+    headers.append(std.http.Header{ .name = "Sec-WebSocket-Version", .value = "13" }) catch unreachable;
+    try headers.appendSlice(extra_headers);
+
     var req = try self.http_client.open(.GET, uri, .{
         .server_header_buffer = &buf,
-        .extra_headers = &.{
-            std.http.Header{ .name = "Upgrade", .value = "websocket" },
-            std.http.Header{ .name = "Connection", .value = "Upgrade" },
-            std.http.Header{ .name = "Sec-WebSocket-Key", .value = &websocket_key },
+        .headers = .{
+            .connection = .{ .override = "Upgrade" },
         },
+        .extra_headers = headers.constSlice(),
     });
-    defer req.deinit();
+    errdefer req.deinit();
 
     try req.send();
     try req.wait();
@@ -65,6 +73,8 @@ pub fn handshake(self: *Client, uri: std.Uri) !void {
     if (!upgrade_seen or !connection_seen or !accept_seen) {
         return error.NotWebsocketServer;
     }
+
+    return client.Connection.init(req);
 }
 
 pub fn deinit(self: *Client) void {
@@ -83,12 +93,12 @@ fn generateRandomWebsocketKey() [b64_encoder.calcSize(16)]u8 {
 
 fn expectedWebsocketAcceptHeader(key: [b64_encoder.calcSize(16)]u8) [b64_encoder.calcSize(20)]u8 {
     const ws_guid = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
-    var buf: [key.len + ws_guid.len]u8 = undefined;
-    std.mem.copyForwards(u8, buf[0..key.len], &key);
-    std.mem.copyForwards(u8, buf[key.len..], ws_guid);
+    var concatted = std.BoundedArray(u8, key.len + ws_guid.len){};
+    concatted.appendSlice(&key) catch unreachable;
+    concatted.appendSlice(ws_guid) catch unreachable;
 
     var sha1 = std.crypto.hash.Sha1.init(.{});
-    sha1.update(&buf);
+    sha1.update(concatted.constSlice());
 
     const digest = sha1.finalResult();
     var out_buf: [b64_encoder.calcSize(digest.len)]u8 = undefined;
