@@ -8,7 +8,7 @@ pub const AnyFrameHeader = union(enum) {
     u32_masked: FrameHeader(.u32, true),
     u80_masked: FrameHeader(.u80, true),
 
-    pub fn init(final: bool, opcode: Opcode, payload_len: u64, mask: Mask) AnyFrameHeader {
+    pub fn init(final: bool, opcode: Opcode, payload_len: u64, mask: MaskStrategy) AnyFrameHeader {
         if (payload_len <= 125) {
             return if (mask.getMask() != null)
                 .{ .u16_masked = FrameHeader(.u16, true).init(final, opcode, @intCast(payload_len), mask) }
@@ -197,7 +197,7 @@ pub fn FrameHeader(comptime size: FrameHeaderSize, comptime has_masking_key: boo
 
         const Self = @This();
 
-        pub fn init(final: bool, opcode: Opcode, payload_len: PayloadLenArgT, mask: Mask) Self {
+        pub fn init(final: bool, opcode: Opcode, payload_len: PayloadLenArgT, mask: MaskStrategy) Self {
             const masking_key = if (has_masking_key)
                 mask.getMask() orelse std.debug.panic("header type {} does not allow for masking key, but mask type {s} was provided", .{ @TypeOf(Self), @tagName(mask) })
             else
@@ -263,16 +263,16 @@ pub const Opcode = enum(u4) {
     }
 };
 
-pub const Mask = union(enum) {
+pub const MaskStrategy = union(enum) {
     unmasked: void,
-    random_mask: void,
-    fixed_mask: u32,
+    rng: std.Random,
+    fixed: u32,
 
-    pub fn getMask(self: Mask) ?u32 {
+    pub fn getMask(self: MaskStrategy) ?u32 {
         return switch (self) {
             .unmasked => null,
-            .random_mask => std.crypto.random.int(u32),
-            .fixed_mask => |fixed| fixed,
+            .rng => |rng| rng.int(u32),
+            .fixed => |fixed| fixed,
         };
     }
 };
@@ -354,7 +354,7 @@ test "write u80 masked" {
     var buf: [10 + 4]u8 = undefined;
     var stream = std.Io.Writer.fixed(&buf);
 
-    const any_frame_header = AnyFrameHeader.init(true, .close, 0xA1A2A3A4A5A6A7A8, .{ .fixed_mask = 0xB1B2B3B4 });
+    const any_frame_header = AnyFrameHeader.init(true, .close, 0xA1A2A3A4A5A6A7A8, .{ .fixed = 0xB1B2B3B4 });
 
     const expected_u80: [10 + 4]u8 = .{ 0b10001000, 0b11111111, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7, 0xA8, 0xB1, 0xB2, 0xB3, 0xB4 };
     try any_frame_header.writeTo(&stream);

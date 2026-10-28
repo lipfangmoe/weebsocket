@@ -14,40 +14,44 @@ Zig Websocket Client (maybe Server one day). Does not implement any WebSocket ex
 To add this to your project, use the Zig Package Manager:
 
 ```bash
-zig fetch --save 'https://github.com/deanveloper/weebsocket/archive/refs/tags/v0.1.1.tar.gz'
+zig fetch --save 'git+https://codeberg.org/lipfang/weebsocket#main'
 ```
 
 ## Usage
 
-```rust
-const std = @import("std");
+```const std = @import("std");
 const ws = @import("weebsocket");
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer gpa.deinit();
-    var client = ws.Client.init(gpa.allocator());
+pub fn main(init: std.process.Init) !void {
+    var client = ws.Client.init(init.io, init.gpa);
     defer client.deinit();
 
     const uri = std.Uri.parse("wss://example.com/") catch unreachable;
     var connection = try client.handshake(uri, null);
     defer connection.deinit(null);
 
-    while (connection.readMessage()) |message| {
-        const payload_reader = message.payloadReader();
-        const payload = try payload_reader.readAllAlloc(gpa.allocator(), 10_000_000);
-        defer gpa.allocator().free(payload);
-        if (std.mem.eql(u8, payload.constSlice(), "foobar")) {
-            try connection.writeMessageString("got your message!");
+    while (true) {
+        var message = try connection.receiveMessage();
+        const payload_reader = message.reader();
+        const payload = try payload_reader.allocRemaining(init.gpa, .limited(10_000_000));
+        defer init.gpa.free(payload);
+        if (std.mem.eql(u8, payload, "foobar")) {
+            // send a string
+            const str = "got your message!";
+            try connection.sendMessage(.text, str);
 
             const Data = struct { int: u32, string: []const u8 };
-            var payload_writer = try connection.writeMessageStreamUnknownLength(.text);
-            var buffered_writer = std.io.bufferedWriter(payload_writer.writer());
-            try std.json.stringify(buffered_writer.writer(), Data{ .int = 5, .string = "some value" }, .{});
-            try buffered_writer.flush();
+            const data: Data = .{ .int = 5, .string = "some value" };
+
+            // low-level control over the buffer and payload writer
+            var buf: [1000]u8 = undefined;
+            var payload_writer = connection.writeMessageStreamUnknownLength(.text, &buf);
+            try std.json.Stringify.value(data, .{}, &payload_writer.interface);
+            try payload_writer.interface.flush();
+
+            // a better way to do the above with `printMessage`
+            try connection.printMessage(.text, "{f}", .{std.json.fmt(data, .{})});
         }
-    } else |err| {
-        return err;
     }
 }
 ```

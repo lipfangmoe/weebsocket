@@ -38,49 +38,44 @@ pub const Type = enum {
 pub const ControlFrameHandlerError = error{ ReceivedCloseFrame, WriteFailed };
 pub const ControlFrameHeaderHandlerFn = *const ControlFrameHeaderHandlerFnBody;
 pub const ControlFrameHeaderHandlerFnBody = fn (
+    mask_strategy: frame.MaskStrategy,
     conn_writer: *std.Io.Writer,
     header: frame.FrameHeader(.u16, false),
     payload: []const u8,
 ) ControlFrameHandlerError!void;
 
-pub const defaultControlFrameHandler: ControlFrameHeaderHandlerFnBody = controlFrameHandlerWithMask(.random_mask);
+pub fn defaultControlFrameHandler(
+    mask_strategy: ws.message.frame.MaskStrategy,
+    conn_writer: *std.Io.Writer,
+    header: frame.FrameHeader(.u16, false),
+    payload: []const u8,
+) ControlFrameHandlerError!void {
+    const opcode: frame.Opcode = header.opcode;
+    std.debug.assert(opcode.isControlFrame());
 
-pub fn controlFrameHandlerWithMask(comptime mask: ws.message.frame.Mask) ControlFrameHeaderHandlerFnBody {
-    const Struct = struct {
-        pub fn handler(
-            conn_writer: *std.Io.Writer,
-            frame_header: frame.FrameHeader(.u16, false),
-            payload: []const u8,
-        ) ControlFrameHandlerError!void {
-            const opcode: frame.Opcode = frame_header.opcode;
-            std.debug.assert(opcode.isControlFrame());
-
-            switch (opcode) {
-                .ping => {
-                    var buf: [1000]u8 = undefined;
-                    var control_message_writer = SingleFrameMessageWriter.initControl(conn_writer, frame_header.payload_len, .pong, mask, &buf) catch |err| {
-                        ws.log.err("Error while writing pong header: {}", .{err});
-                        return error.WriteFailed;
-                    };
-                    control_message_writer.interface.writeAll(payload) catch |err| {
-                        ws.log.err("Error while writing pong payload: {}", .{err});
-                        return error.WriteFailed;
-                    };
-                    control_message_writer.interface.flush() catch |err| {
-                        ws.log.err("Error while writing pong payload: {}", .{err});
-                        return error.WriteFailed;
-                    };
-                },
-                .pong => {},
-                .close => {
-                    ws.log.debug("peer sent close frame with payload '{s}'", .{payload});
-                    return error.ReceivedCloseFrame;
-                },
-                else => unreachable,
-            }
-        }
-    };
-    return Struct.handler;
+    switch (opcode) {
+        .ping => {
+            var buf: [1000]u8 = undefined;
+            var control_message_writer = SingleFrameMessageWriter.initControl(conn_writer, header.payload_len, .pong, mask_strategy, &buf) catch |err| {
+                ws.log.err("Error while writing pong header: {}", .{err});
+                return error.WriteFailed;
+            };
+            control_message_writer.interface.writeAll(payload) catch |err| {
+                ws.log.err("Error while writing pong payload: {}", .{err});
+                return error.WriteFailed;
+            };
+            control_message_writer.interface.flush() catch |err| {
+                ws.log.err("Error while writing pong payload: {}", .{err});
+                return error.WriteFailed;
+            };
+        },
+        .pong => {},
+        .close => {
+            ws.log.debug("peer sent close frame with payload '{s}'", .{payload});
+            return error.ReceivedCloseFrame;
+        },
+        else => unreachable,
+    }
 }
 
 /// toggles the bytes between masked/unmasked form.
@@ -89,4 +84,9 @@ pub fn mask_unmask(payload_start: usize, masking_key: [4]u8, bytes: []u8) void {
         const original_octet = transformed_octet.* ^ masking_key[payload_idx % 4];
         transformed_octet.* = original_octet;
     }
+}
+
+test {
+    std.testing.refAllDecls(@This());
+    _ = @import("./message/utf8_validator.zig");
 }

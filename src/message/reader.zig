@@ -25,13 +25,15 @@ pub const MessageReader = struct {
     buf: []u8,
     reader_impl: ?ReaderImpl = null,
     control_frame_writer: *std.Io.Writer,
+    control_frame_mask_strategy: ws.message.frame.MaskStrategy,
     controlFrameHandler: ws.message.ControlFrameHeaderHandlerFn,
     stream_error: ?StreamError = null,
 
-    pub fn init(underlying_reader: *std.Io.Reader, controlFrameHandler: ws.message.ControlFrameHeaderHandlerFn, control_frame_writer: *std.Io.Writer, buf: []u8) MessageReader {
+    pub fn init(underlying_reader: *std.Io.Reader, mask_strategy: ws.message.frame.MaskStrategy, controlFrameHandler: ws.message.ControlFrameHeaderHandlerFn, control_frame_writer: *std.Io.Writer, buf: []u8) MessageReader {
         return .{
             .underlying_reader = underlying_reader,
             .controlFrameHandler = controlFrameHandler,
+            .control_frame_mask_strategy = mask_strategy,
             .control_frame_writer = control_frame_writer,
             .buf = buf,
         };
@@ -39,7 +41,7 @@ pub const MessageReader = struct {
 
     // reads headers from reader
     pub fn receiveHead(self: *MessageReader) ReadHeaderError!void {
-        const header = try readUntilDataFrameHeader(self.controlFrameHandler, self.underlying_reader, self.control_frame_writer);
+        const header = try readUntilDataFrameHeader(self.control_frame_mask_strategy, self.controlFrameHandler, self.underlying_reader, self.control_frame_writer);
         if (header.asMostBasicHeader().opcode == .continuation) {
             ws.log.err("continuation frame found as initial frame, which is not allowed", .{});
             return error.InvalidMessage;
@@ -48,7 +50,14 @@ pub const MessageReader = struct {
         if (header.asMostBasicHeader().fin) {
             self.reader_impl = .{ .unfragmented = .init(self.underlying_reader, header, self.buf) };
         } else {
-            self.reader_impl = .{ .fragmented = .init(self.underlying_reader, self.control_frame_writer, self.controlFrameHandler, header, self.buf) };
+            self.reader_impl = .{ .fragmented = .init(
+                self.underlying_reader,
+                self.control_frame_writer,
+                self.control_frame_mask_strategy,
+                self.controlFrameHandler,
+                header,
+                self.buf,
+            ) };
         }
     }
 
@@ -111,6 +120,7 @@ pub const ReaderImpl = union(enum) {
 pub const FragmentedPayloadReader = struct {
     underlying_reader: *std.Io.Reader,
     control_frame_writer: *std.Io.Writer,
+    control_frame_mask_strategy: ws.message.frame.MaskStrategy,
     controlFrameHandler: ws.message.ControlFrameHeaderHandlerFn,
     first_header: ws.message.frame.AnyFrameHeader,
     state: State,
@@ -119,6 +129,7 @@ pub const FragmentedPayloadReader = struct {
     pub fn init(
         underlying_reader: *std.Io.Reader,
         control_frame_writer: *std.Io.Writer,
+        control_frame_mask_strategy: ws.message.frame.MaskStrategy,
         controlFrameHandler: ws.message.ControlFrameHeaderHandlerFn,
         first_header: ws.message.frame.AnyFrameHeader,
         buf: []u8,
@@ -126,6 +137,7 @@ pub const FragmentedPayloadReader = struct {
         return FragmentedPayloadReader{
             .underlying_reader = underlying_reader,
             .control_frame_writer = control_frame_writer,
+            .control_frame_mask_strategy = control_frame_mask_strategy,
             .controlFrameHandler = controlFrameHandler,
             .first_header = first_header,
             .state = .{ .in_payload = .{
@@ -152,7 +164,7 @@ pub const FragmentedPayloadReader = struct {
     fn stream(self: *FragmentedPayloadReader, writer: *std.Io.Writer, limit: std.Io.Limit) StreamError!usize {
         switch (self.state) {
             .waiting_for_next_header => |state| {
-                const header = try readUntilDataFrameHeader(self.controlFrameHandler, self.underlying_reader, self.control_frame_writer);
+                const header = try readUntilDataFrameHeader(self.control_frame_mask_strategy, self.controlFrameHandler, self.underlying_reader, self.control_frame_writer);
                 if (header.asMostBasicHeader().opcode != .continuation) {
                     ws.log.err("frame type {} found while reading fragmented message, should be .continuation", .{header.asMostBasicHeader().opcode});
                     return error.InvalidMessage;
@@ -365,6 +377,7 @@ pub const UnfragmentedPayloadReader = struct {
 
 /// loops through messages until a non-control frame is found, calling controlFrameHandler on each control frame.
 fn readUntilDataFrameHeader(
+    control_frame_mask_strategy: ws.message.frame.MaskStrategy,
     controlFrameHandler: ws.message.ControlFrameHeaderHandlerFn,
     reader: *std.Io.Reader,
     writer: *std.Io.Writer,
@@ -402,7 +415,7 @@ fn readUntilDataFrameHeader(
                 return error.UnexpectedReadFailure;
             };
 
-            controlFrameHandler(writer, control_frame_header, payload_buf_writer.buffered()) catch |err| return switch (err) {
+            controlFrameHandler(control_frame_mask_strategy, writer, control_frame_header, payload_buf_writer.buffered()) catch |err| return switch (err) {
                 error.ReceivedCloseFrame => |err_cast| err_cast,
                 error.WriteFailed => error.UnexpectedControlFrameResponseFailure,
             };
@@ -427,6 +440,7 @@ test "A single-frame unmasked text message" {
     var writer = std.Io.Writer.Discarding.init(&writer_buf);
     var message_reader = MessageReader.init(
         &reader,
+        .unmasked,
         &panic_control_frame_handler,
         &writer.writer,
         &message_reader_buf,
@@ -447,6 +461,7 @@ test "A single-frame masked text message" {
     var writer = std.Io.Writer.Discarding.init(&writer_buf);
     var message_reader = MessageReader.init(
         &reader,
+        .unmasked,
         &panic_control_frame_handler,
         &writer.writer,
         &message_reader_buf,
@@ -466,6 +481,7 @@ test "A fragmented unmasked text message" {
     var writer = std.Io.Writer.Discarding.init(&writer_buf);
     var message_reader = MessageReader.init(
         &reader,
+        .unmasked,
         &panic_control_frame_handler,
         &writer.writer,
         &message_reader_buf,
@@ -502,6 +518,7 @@ test "a long unfragmented unmasked message" {
     var writer = std.Io.Writer.Discarding.init(&writer_buf);
     var message_reader = MessageReader.init(
         &reader,
+        .unmasked,
         &panic_control_frame_handler,
         &writer.writer,
         &message_reader_buf,
@@ -531,7 +548,8 @@ test "(not in spec) A fragmented unmasked text message interrupted with a contro
     var message_reader_buf: [1000]u8 = undefined;
     var message_reader = MessageReader.init(
         &reader,
-        &ws.message.controlFrameHandlerWithMask(.{ .fixed_mask = 0x37FA213D }),
+        .{ .fixed = 0x37FA213D },
+        &ws.message.defaultControlFrameHandler,
         &writer.writer,
         &message_reader_buf,
     );
@@ -544,6 +562,6 @@ test "(not in spec) A fragmented unmasked text message interrupted with a contro
     try std.testing.expectEqualSlices(u8, &.{ 0x8a, 0x85, 0x37, 0xfa, 0x21, 0x3d, 0x7f, 0x9f, 0x4d, 0x51, 0x58 }, writer.written());
 }
 
-fn panic_control_frame_handler(_: *std.Io.Writer, _: ws.message.frame.FrameHeader(.u16, false), _: []const u8) ws.message.ControlFrameHandlerError!void {
+fn panic_control_frame_handler(_: ws.message.frame.MaskStrategy, _: *std.Io.Writer, _: ws.message.frame.FrameHeader(.u16, false), _: []const u8) ws.message.ControlFrameHandlerError!void {
     @panic("nooo");
 }
