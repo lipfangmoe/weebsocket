@@ -14,7 +14,7 @@ Zig Websocket Client (maybe Server one day). Does not implement any WebSocket ex
 To add this to your project, use the Zig Package Manager:
 
 ```bash
-zig fetch --save 'https://github.com/deanveloper/weebsocket/archive/refs/tags/v0.1.0.tar.gz' # todo - change to use tagged versions
+zig fetch --save 'https://github.com/deanveloper/weebsocket/archive/refs/tags/v0.1.0.tar.gz'
 ```
 
 ## Usage
