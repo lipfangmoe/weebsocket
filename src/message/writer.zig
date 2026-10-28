@@ -10,6 +10,11 @@ pub const MessageWriter = struct {
     pub const initUnknownLength = FragmentedMessageWriter.init;
 };
 
+/// Represents an outgoing message which will only span one frame.
+///
+/// Noteworthy that the flush implementation of this writer will *also* flush the underlying writer (aka the websocket buffer).
+///
+/// Don't forget to flush!
 pub const UnfragmentedPayloadWriter = struct {
     interface: std.Io.Writer,
     underlying_writer: *std.Io.Writer,
@@ -32,7 +37,7 @@ pub const UnfragmentedPayloadWriter = struct {
             .payload_bytes_written = 0,
             .interface = std.Io.Writer{
                 .buffer = buffer,
-                .vtable = &std.Io.Writer.VTable{ .drain = drain },
+                .vtable = &std.Io.Writer.VTable{ .drain = drainFn, .flush = flushFn },
             },
         };
     }
@@ -51,12 +56,12 @@ pub const UnfragmentedPayloadWriter = struct {
         return .initWithHeader(underlying_writer, frame_header, buffer);
     }
 
-    pub fn drain(writer: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+    fn drainFn(writer: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
         const self: *UnfragmentedPayloadWriter = @alignCast(@fieldParentPtr("interface", writer));
-        return drainInternal(self, data, splat) catch return error.WriteFailed;
+        return drain(self, data, splat) catch return error.WriteFailed;
     }
 
-    pub fn drainInternal(self: *UnfragmentedPayloadWriter, data: []const []const u8, splat: usize) WriteError!usize {
+    fn drain(self: *UnfragmentedPayloadWriter, data: []const []const u8, splat: usize) WriteError!usize {
         const payload_len = self.frame_header.getPayloadLen() catch std.debug.panic("overflow", .{});
         const remaining_bytes = payload_len - self.payload_bytes_written;
 
@@ -88,6 +93,12 @@ pub const UnfragmentedPayloadWriter = struct {
         return self.interface.consume(n);
     }
 
+    fn flushFn(writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        const self: *UnfragmentedPayloadWriter = @alignCast(@fieldParentPtr("interface", writer));
+        try self.interface.defaultFlush();
+        try self.underlying_writer.flush();
+    }
+
     /// Writes entirely null bytes for the remainder of the payload
     pub fn discard(self: *UnfragmentedPayloadWriter) WritePayloadError!void {
         const payload_len = self.frame_header.getPayloadLen() catch return error.PayloadTooLong;
@@ -99,7 +110,9 @@ pub const UnfragmentedPayloadWriter = struct {
 
 /// Represents an outgoing message that may span multiple frames.
 ///
-/// Don't forget to close!
+/// Noteworthy that the flush implementation of this writer will *also* flush the underlying writer (aka the websocket buffer)
+///
+/// Don't forget to flush, and close!
 pub const FragmentedMessageWriter = struct {
     interface: std.Io.Writer,
     underlying_writer: *std.Io.Writer,
@@ -116,12 +129,12 @@ pub const FragmentedMessageWriter = struct {
             .mask = mask,
             .interface = std.Io.Writer{
                 .buffer = buffer,
-                .vtable = &std.Io.Writer.VTable{ .drain = drain },
+                .vtable = &std.Io.Writer.VTable{ .drain = drain, .flush = flush },
             },
         };
     }
 
-    pub fn drain(writer: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+    fn drain(writer: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
         const self: *FragmentedMessageWriter = @alignCast(@fieldParentPtr("interface", writer));
 
         // if there is no data to drain, do not write anything
@@ -137,6 +150,12 @@ pub const FragmentedMessageWriter = struct {
         self.opcode = .continuation;
 
         return try self.writePayloadFragment(data, splat, frame_header);
+    }
+
+    fn flush(writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        const self: *FragmentedMessageWriter = @alignCast(@fieldParentPtr("interface", writer));
+        try self.interface.defaultFlush();
+        try self.underlying_writer.flush();
     }
 
     fn writePayloadFragment(self: *FragmentedMessageWriter, data: []const []const u8, splat: usize, frame_header: ws.message.frame.AnyFrameHeader) std.Io.Writer.Error!usize {

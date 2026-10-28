@@ -145,7 +145,7 @@ pub fn sendMessage(self: *Connection, msg_type: ws.message.Type, message: []cons
     };
 }
 
-/// Writes a stream of bytes as a websocket message.
+/// Writes a stream of bytes as a websocket message. Don't forget to flush!
 pub fn writeMessageStream(self: *Connection, msg_type: ws.message.Type, buf: []u8, message_length: usize) SendMessageError!ws.message.SingleFrameMessageWriter {
     if (self.self_closing) {
         std.debug.panic("Trying to write message after closing self", .{});
@@ -156,16 +156,16 @@ pub fn writeMessageStream(self: *Connection, msg_type: ws.message.Type, buf: []u
 /// Creates a MessageWriter, which writes a Websocket Frame Header, and then
 /// returns a Writer which can be used to write the websocket payload.
 ///
-/// Each call to `write` will be written in its entirety to a new websocket frame. It is highly recommended
-/// to wrap the returned writer in a `std.io.BufferedWriter` in order to prevent excessive websocket frame headers.
+/// This function should only be used when the length is extremely long, and calculating
+/// the length of the buffer ahead-of-time would be extremely difficult.
+/// If possible, it's recommended to instead use self.sendMessage() or self.writeMessageStream().
 ///
 /// Also, you must call `.close()` on the MessageWriter when you are finished writing the message.
-pub fn writeMessageStreamUnknownLength(self: *Connection, msg_type: ws.message.Type) ws.message.MultiFrameMessageWriter {
+pub fn writeMessageStreamUnknownLength(self: *Connection, msg_type: ws.message.Type, buf: []u8) ws.message.MultiFrameMessageWriter {
     if (self.self_closing) {
         std.debug.panic("Trying to write message after closing self", .{});
     }
-    var buf: [8000]u8 = undefined;
-    return ws.MessageWriter.initUnknownLength(self.writer(), msg_type, .random_mask, &buf);
+    return ws.MessageWriter.initUnknownLength(self.writer(), msg_type, .random_mask, buf);
 }
 
 fn reader(self: *Connection) *std.Io.Reader {
