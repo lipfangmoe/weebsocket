@@ -1,0 +1,16 @@
+name: fuzzingserver
+services:
+  fuzzingserver:
+    image: crossbario/autobahn-testsuite
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9001"]
+      interval: 1s
+      timeout: 1s
+      retries: 5
+      start_period: 5s
+      start_interval: 1s
+    volumes:
+      - ./config:/config
+      - ./reports:/reports
+    ports:
+      - 9001:9001
