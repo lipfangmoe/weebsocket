@@ -174,13 +174,13 @@ pub fn FrameHeader(comptime size: FrameHeaderSize, comptime has_masking_key: boo
     return packed struct {
         /// The XOR mask to put on the payload
         masking_key: if (has_masking_key) u32 else void,
-        /// If payload_len is set to 126 or 127, this is the true payload length.
+        /// If payload_len is set to 126 (for u32) or 127 (for u80), this is the true payload length.
         extended_payload_len: switch (size) {
             .u16 => void,
             .u32 => u16,
             .u80 => u64,
         },
-        /// The length of the payload of the frame. If set to 126 or 127, extended_payload_len is the true payload length.
+        /// The length of the payload of the frame. If set to 126 (for u32) or 127 (for u80), extended_payload_len is the true payload length.
         payload_len: u7,
         /// Defines whether or not a mask should be included
         mask: bool,

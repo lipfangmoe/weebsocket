@@ -134,13 +134,13 @@ pub const FragmentedPayloadReader = struct {
                 .prev_partial_codepoint_buf = .{ 0, 0, 0 },
                 .prev_partial_codepoint_len = 0,
             } },
-            .interface = .{ .buffer = buf, .seek = 0, .end = 0, .vtable = &.{ .stream = &stream } },
+            .interface = .{ .buffer = buf, .seek = 0, .end = 0, .vtable = &.{ .stream = &streamFn } },
         };
     }
 
-    fn stream(reader: *std.Io.Reader, writer: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
+    fn streamFn(reader: *std.Io.Reader, writer: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
         const self: *FragmentedPayloadReader = @alignCast(@fieldParentPtr("interface", reader));
-        return self.streamInternal(writer, limit) catch |err| {
+        return self.stream(writer, limit) catch |err| {
             self.state = .{ .err = err };
             if (err == error.EndOfStream) {
                 return error.EndOfStream;
@@ -149,7 +149,7 @@ pub const FragmentedPayloadReader = struct {
         };
     }
 
-    fn streamInternal(self: *FragmentedPayloadReader, writer: *std.Io.Writer, limit: std.Io.Limit) StreamError!usize {
+    fn stream(self: *FragmentedPayloadReader, writer: *std.Io.Writer, limit: std.Io.Limit) StreamError!usize {
         switch (self.state) {
             .waiting_for_next_header => |state| {
                 const header = try readUntilDataFrameHeader(self.controlFrameHandler, self.underlying_reader, self.control_frame_writer);
@@ -182,7 +182,7 @@ pub const FragmentedPayloadReader = struct {
         }
         var buf: [1000]u8 = undefined;
         var buf_writer = std.Io.Writer.fixed(&buf);
-        const n = self.underlying_reader.stream(&buf_writer, limit.min(.limited(remaining_bytes))) catch |err| switch (err) {
+        const n = self.underlying_reader.stream(&buf_writer, limit.min(.limited(remaining_bytes)).min(.limited(buf.len))) catch |err| switch (err) {
             error.EndOfStream => {
                 return try handleEndOfFragment(&self.state);
             },
@@ -273,16 +273,14 @@ pub const UnfragmentedPayloadReader = struct {
                 .buffer = buffer,
                 .seek = 0,
                 .end = 0,
-                .vtable = &.{
-                    .stream = &stream,
-                },
+                .vtable = &.{ .stream = &streamFn },
             },
         };
     }
 
-    fn stream(interface: *std.Io.Reader, writer: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
+    fn streamFn(interface: *std.Io.Reader, writer: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
         const self: *UnfragmentedPayloadReader = @alignCast(@fieldParentPtr("interface", interface));
-        return self.streamInternal(writer, limit) catch |err| {
+        return self.stream(writer, limit) catch |err| {
             switch (err) {
                 error.EndOfStream => return error.EndOfStream,
                 else => return error.ReadFailed,
@@ -290,7 +288,7 @@ pub const UnfragmentedPayloadReader = struct {
         };
     }
 
-    fn streamInternal(self: *UnfragmentedPayloadReader, writer: *std.Io.Writer, limit: std.Io.Limit) StreamPayloadError!usize {
+    fn stream(self: *UnfragmentedPayloadReader, writer: *std.Io.Writer, limit: std.Io.Limit) StreamPayloadError!usize {
         const state = switch (self.state) {
             .err => |err| return err,
             .ok => |*ok| ok,
@@ -312,7 +310,7 @@ pub const UnfragmentedPayloadReader = struct {
 
         var buf: [1000]u8 = undefined;
         var buf_writer = std.Io.Writer.fixed(&buf);
-        const bytes_streamed = self.underlying_reader.stream(&buf_writer, limit.min(.limited(remaining_payload))) catch |err| switch (err) {
+        const bytes_streamed = self.underlying_reader.stream(&buf_writer, limit.min(.limited(remaining_payload)).min(.limited(buf.len))) catch |err| switch (err) {
             error.EndOfStream => {
                 if (state.prev_partial_codepoint_len > 0) {
                     const prev_partial_codepoint = state.prev_partial_codepoint_buf[0..state.prev_partial_codepoint_len];
@@ -477,6 +475,42 @@ test "A fragmented unmasked text message" {
     const output_len = try message_reader.reader().readSliceShort(&output);
 
     try std.testing.expectEqualStrings("Hello", output[0..output_len]);
+}
+
+test "a long unfragmented unmasked message" {
+    const header = ws.message.frame.AnyFrameHeader{ .u32_unmasked = .{
+        .fin = true,
+        .opcode = .text,
+        .mask = false,
+        .masking_key = void{},
+        .payload_len = 126,
+        .extended_payload_len = 10_000,
+        .rsv1 = false,
+        .rsv2 = false,
+        .rsv3 = false,
+    } };
+    const payload: [10_000]u8 = .{42} ** 10_000;
+
+    var full_message_writer = std.Io.Writer.Allocating.init(std.testing.allocator);
+    try header.writeTo(&full_message_writer.writer);
+    try full_message_writer.writer.writeAll(&payload);
+    defer full_message_writer.deinit();
+
+    var reader = std.Io.Reader.fixed(full_message_writer.written());
+    var message_reader_buf: [100]u8 = undefined;
+    var writer_buf: [100]u8 = undefined;
+    var writer = std.Io.Writer.Discarding.init(&writer_buf);
+    var message_reader = MessageReader.init(
+        &reader,
+        &panic_control_frame_handler,
+        &writer.writer,
+        &message_reader_buf,
+    );
+    try message_reader.receiveHead();
+    var output: [10_000]u8 = undefined;
+    const output_len = try message_reader.reader().readSliceShort(&output);
+
+    try std.testing.expectEqualSlices(u8, &payload, output[0..output_len]);
 }
 
 test "(not in spec) A fragmented unmasked text message interrupted with a control frame" {
